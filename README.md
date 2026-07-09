@@ -14,7 +14,14 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+
+# Copy the example env and fill in your keys
+cp .env.example .env
 ```
+
+The news + AI analysis steps need two API keys in `.env`:
+`GROQ_API_KEY` (see [News & AI analysis](#news--ai-analysis)) and
+`FINNHUB_API_KEY` (free key from <https://finnhub.io>).
 
 ## Pipeline
 
@@ -26,7 +33,9 @@ Run the steps in order (each reads/writes `data/marketdb.db`):
 | 2. Current snapshot (price, MAs, volume, volatility) | `python ingestion/fetch_prices.py` | `stocks` |
 | 3. Fundamental score | `python analysis/fundamental/score.py` | `fundamental_scores` |
 | 4. Combined score (fundamental + technical + volatility + volume) | `python analysis/combined_score.py` | `final_scores` |
-| 5. Dashboard | `streamlit run dashboard/app.py` | — |
+| 5. Fetch news (Yahoo RSS + Finnhub) | `python ingestion/fetch_news.py` | `news_raw` |
+| 6. Analyse news with LLM (Groq) | `python reasoning/analyze_news.py` | `news_analysis` |
+| 7. Dashboard | `streamlit run dashboard/app.py` | — |
 
 The **RSI** and the dashboard **price/moving-average chart** are computed from
 the real daily closes stored in `price_history` by step 1. Without it, the RSI
@@ -58,12 +67,62 @@ stays current. Example crontab entry (weekdays, 22:30 UTC ≈ 18:30 ET):
 On Windows, use Task Scheduler with an equivalent daily trigger calling
 `.venv\Scripts\python.exe ingestion\ingest_prices.py`.
 
+## News & AI analysis
+
+Two steps, **run in this order** (analysis reads what the fetch stored):
+
+```bash
+python ingestion/fetch_news.py       # 1. collect news  -> news_raw
+python reasoning/analyze_news.py     # 2. analyse them   -> news_analysis
+```
+
+`fetch_news.py` pulls recent headlines per ticker from the Yahoo Finance RSS
+feed and the Finnhub `/company-news` endpoint (last 7 days), merges and
+de-duplicates them, and upserts into `news_raw` (idempotent).
+
+`analyze_news.py` sends each not-yet-analysed news item to **Groq** and stores a
+structured JSON verdict (company, sector, importance 1-10, tone, likely impact,
+horizon, confidence) in `news_analysis`. Results are cached: a news item is
+never analysed twice.
+
+### Groq API key
+
+1. Create a free account at <https://console.groq.com>.
+2. Generate an API key under **API Keys**.
+3. Put it in `.env` as `GROQ_API_KEY=...`.
+
+### Free-tier daily quota — watch it
+
+The Groq free tier is capped (**~1000 requests/day**). Two safeguards are built
+in:
+
+* A **strict pre-filter** runs before any API call — it drops titles shorter
+  than 20 characters, sponsored/ad content, and near-duplicate headlines for the
+  same ticker.
+* A **daily call counter** (`llm_usage` table) stops the run once
+  `DAILY_CALL_LIMIT` (1000) is reached, and rate-limit errors (HTTP 429) are
+  retried with exponential backoff.
+
+**Always estimate first with `--dry-run`** (no API calls), then run for real:
+
+```bash
+python reasoning/analyze_news.py --dry-run                 # how many would run
+python reasoning/analyze_news.py --tickers AAPL,MSFT       # subset of tickers
+python reasoning/analyze_news.py --limit 50                # cap this run
+```
+
+The dashboard's **News & Analyse IA** page (sidebar navigation) shows, per
+ticker, the analysed headlines with a colour-coded tone, importance and impact
+summary.
+
 ## Note on SSL / corporate networks
 
-`ingest_prices.py` builds a CA bundle from the OS trust store (merged with
-`certifi`) before calling yfinance. This works around networks that intercept
-TLS with a proxy whose root certificate is only in the system store, which
-otherwise causes `curl: (60) unable to get local issuer certificate` errors.
+The ingestion scripts call `ingestion/ssl_utils.py:configure_ca_bundle()` before
+any network client, building a CA bundle from the OS trust store (merged with
+`certifi`). This works around networks that intercept TLS with a proxy whose
+root certificate is only in the system store, which otherwise causes
+`curl: (60) unable to get local issuer certificate` (yfinance) or equivalent
+SSL verification errors (requests / groq).
 
 ## Tracked tickers
 

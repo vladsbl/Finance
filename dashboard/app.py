@@ -272,16 +272,93 @@ def render_stats(df):
     c5.metric("Worst", worst["symbol"], f"{worst['final_score']:.1f}")
 
 
+# --- News & AI analysis ----------------------------------------------------
+
+NEWS_SQL = """
+SELECT n.ticker, n.title, n.url, n.published_at, n.source,
+       a.company, a.sector, a.importance, a.tonalite, a.impact,
+       a.horizon, a.confidence
+FROM news_analysis a
+JOIN news_raw n ON n.id = a.news_id
+ORDER BY n.ticker, a.importance DESC, n.published_at DESC;
+"""
+
+
+@st.cache_data(show_spinner=False)
+def load_news():
+    """Return (news_df, error). Empty df (no error) when nothing analysed yet."""
+    if not os.path.exists(DB_PATH):
+        return pd.DataFrame(), None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        news = pd.read_sql_query(NEWS_SQL, conn)
+        conn.close()
+    except (sqlite3.Error, pd.errors.DatabaseError):
+        # news_raw / news_analysis not created yet.
+        return pd.DataFrame(), None
+    return news, None
+
+
+def tonalite_color(tonalite):
+    t = (tonalite or "").lower()
+    if t.startswith("pos"):
+        return COLOR_GOOD
+    if t.startswith("neg"):
+        return COLOR_BAD
+    return "#6b7280"  # neutre
+
+
+def render_news_page():
+    st.subheader("News & Analyse IA")
+    news, error = load_news()
+    if error:
+        st.error(error)
+        return
+    if news.empty:
+        st.info(
+            "Aucune news analysee pour l'instant. Lance :\n\n"
+            "1. `python ingestion/fetch_news.py`\n"
+            "2. `python reasoning/analyze_news.py`"
+        )
+        return
+
+    tickers = sorted(news["ticker"].unique())
+    ticker = st.selectbox("Ticker", tickers, key="news_ticker")
+    sub = news[news["ticker"] == ticker].reset_index(drop=True)
+    st.caption(f"{len(sub)} news analysees pour {ticker}")
+
+    for _, r in sub.iterrows():
+        color = tonalite_color(r["tonalite"])
+        badge = (
+            f"<span style='background:{color};color:white;padding:2px 10px;"
+            f"border-radius:12px;font-size:0.8em'>{r['tonalite']}</span>"
+        )
+        importance = int(r["importance"]) if pd.notna(r["importance"]) else "?"
+        confidence = int(r["confidence"]) if pd.notna(r["confidence"]) else "?"
+        title = r["title"]
+        title_html = (
+            f"<a href='{r['url']}' target='_blank'>{title}</a>"
+            if r["url"] else title
+        )
+        st.markdown(
+            f"{badge}&nbsp;&nbsp;<b>Importance {importance}/10</b>"
+            f"&nbsp;&nbsp;&middot;&nbsp;&nbsp;confiance {confidence}%<br>"
+            f"{title_html}",
+            unsafe_allow_html=True,
+        )
+        meta = " &middot; ".join(
+            str(x) for x in [r["company"], r["sector"], r["horizon"],
+                             f"source: {r['source']}"] if x
+        )
+        st.caption(meta)
+        if r["impact"]:
+            st.write(r["impact"])
+        st.divider()
+
+
 # --- Main ------------------------------------------------------------------
 
-def main():
-    st.set_page_config(page_title="Market Intelligence Dashboard", layout="wide")
-    st.title("Market Intelligence Dashboard")
-
-    if st.button("Refresh Data"):
-        load_data.clear()
-        st.rerun()
-
+def render_scores_page():
     df, history, error = load_data()
     if error:
         st.error(error)
@@ -294,6 +371,22 @@ def main():
     render_chart(df, history, symbol)
     st.divider()
     render_stats(df)
+
+
+def main():
+    st.set_page_config(page_title="Market Intelligence Dashboard", layout="wide")
+    st.title("Market Intelligence Dashboard")
+
+    page = st.sidebar.radio("Navigation", ["Scores", "News & Analyse IA"])
+    if st.sidebar.button("Refresh Data"):
+        load_data.clear()
+        load_news.clear()
+        st.rerun()
+
+    if page == "Scores":
+        render_scores_page()
+    else:
+        render_news_page()
 
 
 if __name__ == "__main__":

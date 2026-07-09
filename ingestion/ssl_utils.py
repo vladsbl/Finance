@@ -21,11 +21,15 @@ def configure_ca_bundle(data_dir):
     Writes ``<data_dir>/ca_bundle.pem`` and sets CURL_CA_BUNDLE,
     SSL_CERT_FILE and REQUESTS_CA_BUNDLE. No-op if certifi is unavailable.
     Must be called before ``import yfinance``.
+
+    Returns the path to the CA bundle (or None if certifi is unavailable), so
+    callers using clients that ignore the env vars -- e.g. httpx/groq -- can
+    pass ``verify=<bundle>`` explicitly.
     """
     try:
         import certifi
     except ImportError:
-        return
+        return None
 
     parts = [open(certifi.where(), "r", encoding="utf-8").read()]
     if hasattr(ssl, "enum_certificates"):  # Windows only
@@ -49,3 +53,4 @@ def configure_ca_bundle(data_dir):
 
     for var in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
         os.environ[var] = bundle
+    return bundle
