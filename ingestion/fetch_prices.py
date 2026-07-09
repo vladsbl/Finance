@@ -7,11 +7,60 @@ Run directly:
 
 import logging
 import os
+import ssl
 import sqlite3
 import sys
 
-import numpy as np
-import yfinance as yf
+# Local SQLite database lives under data/marketdb.db, relative to the repo
+# root (the parent of this file's directory).
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DB_PATH = os.path.join(DATA_DIR, "marketdb.db")
+
+
+def _configure_ca_bundle():
+    """Point yfinance/curl_cffi at a CA bundle it can actually verify against.
+
+    Many corporate networks intercept TLS with a proxy whose root CA lives only
+    in the Windows trust store, not in certifi -- which makes yfinance requests
+    fail (intermittently) with "unable to get local issuer certificate". We
+    merge the Windows ROOT/CA stores into certifi's bundle and export the
+    environment variables curl_cffi/requests read. On non-Windows (e.g. a Linux
+    cron host) we fall back to certifi alone.
+    """
+    try:
+        import certifi
+    except ImportError:
+        return
+
+    parts = [open(certifi.where(), "r", encoding="utf-8").read()]
+    if hasattr(ssl, "enum_certificates"):  # Windows only
+        for store in ("ROOT", "CA"):
+            try:
+                for cert, _enc, _trust in ssl.enum_certificates(store):
+                    try:
+                        parts.append(ssl.DER_cert_to_PEM_cert(cert))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        bundle = os.path.join(DATA_DIR, "ca_bundle.pem")
+        with open(bundle, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(parts))
+    except OSError:
+        bundle = certifi.where()
+
+    for var in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        os.environ[var] = bundle
+
+
+# Must run before importing yfinance so curl_cffi picks up the bundle.
+_configure_ca_bundle()
+
+import numpy as np  # noqa: E402
+import yfinance as yf  # noqa: E402
 
 # --- Configuration ---------------------------------------------------------
 
@@ -23,11 +72,6 @@ SYMBOLS = [
 # Number of trading days of history to download. 200-day MA needs at least
 # 200 sessions, plus a margin for holidays/weekends.
 HISTORY_PERIOD = "1y"
-
-# Local SQLite database lives under data/marketdb.db, relative to the repo
-# root (the parent of this file's directory).
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-DB_PATH = os.path.join(DATA_DIR, "marketdb.db")
 
 logging.basicConfig(
     level=logging.INFO,
