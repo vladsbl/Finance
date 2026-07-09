@@ -60,10 +60,10 @@ JOIN (SELECT symbol, MAX(id) AS max_id FROM final_scores GROUP BY symbol) l
 """
 
 PRICE_HISTORY_SQL = """
-SELECT symbol, current_price, timestamp
-FROM stocks
-WHERE current_price IS NOT NULL
-ORDER BY symbol, id;
+SELECT ticker AS symbol, date, close
+FROM price_history
+WHERE close IS NOT NULL
+ORDER BY ticker, date;
 """
 
 
@@ -72,14 +72,15 @@ def load_data():
     """Load and merge the source tables. Returns (df, history, error).
 
     ``df`` is one row per symbol with stock metrics + scores + computed RSI.
-    ``history`` maps symbol -> DataFrame(price, timestamp).
+    ``history`` maps symbol -> DataFrame(date, close) of real daily bars.
     ``error`` is a human-readable string when data can't be loaded, else None.
     """
     if not os.path.exists(DB_PATH):
         return None, None, (
             f"Database not found at `{DB_PATH}`.\n\n"
             "Run the pipeline first: `python ingestion/fetch_prices.py`, "
-            "then `python analysis/fundamental/score.py` and "
+            "`python ingestion/ingest_prices.py`, then "
+            "`python analysis/fundamental/score.py` and "
             "`python analysis/combined_score.py`."
         )
 
@@ -87,7 +88,11 @@ def load_data():
         conn = sqlite3.connect(DB_PATH)
         stocks = pd.read_sql_query(LATEST_STOCKS_SQL, conn)
         finals = pd.read_sql_query(LATEST_FINAL_SQL, conn)
-        history_raw = pd.read_sql_query(PRICE_HISTORY_SQL, conn)
+        # price_history is optional: absent until ingest_prices.py has run.
+        try:
+            history_raw = pd.read_sql_query(PRICE_HISTORY_SQL, conn)
+        except (sqlite3.Error, pd.errors.DatabaseError):
+            history_raw = pd.DataFrame(columns=["symbol", "date", "close"])
         conn.close()
     except (sqlite3.Error, pd.errors.DatabaseError) as exc:
         return None, None, f"Could not read the database: {exc}"
@@ -109,7 +114,7 @@ def load_data():
         )
 
     history = {
-        sym: g[["current_price", "timestamp"]].reset_index(drop=True)
+        sym: g[["date", "close"]].reset_index(drop=True)
         for sym, g in history_raw.groupby("symbol")
     }
 
@@ -117,7 +122,7 @@ def load_data():
     rsis, is_real = [], []
     for _, row in df.iterrows():
         prices = history.get(row["symbol"], pd.DataFrame())
-        series = prices["current_price"].tolist() if not prices.empty else []
+        series = prices["close"].tolist() if not prices.empty else []
         rsi = compute_rsi(series)
         if rsi is None:
             rsi = proxy_rsi(row["current_price"], row["ma_50"], row["ma_200"])
@@ -212,38 +217,44 @@ def render_detail(df):
 
 def render_chart(df, history, symbol):
     st.subheader("3 - Prix & moyennes mobiles")
-    row = df[df["symbol"] == symbol].iloc[0]
     prices = history.get(symbol, pd.DataFrame())
 
-    fig = go.Figure()
     if prices.empty:
-        st.info("No price history available for this stock.")
+        st.info(
+            "No price history for this stock yet. "
+            "Run `python ingestion/ingest_prices.py` to populate `price_history`."
+        )
         return
 
+    prices = prices.copy()
+    prices["date"] = pd.to_datetime(prices["date"])
+    prices = prices.sort_values("date")
+    # True moving averages from the real daily closes (NaN until the window
+    # fills, so plotly simply starts each line where it becomes valid).
+    prices["ma_50"] = prices["close"].rolling(50).mean()
+    prices["ma_200"] = prices["close"].rolling(200).mean()
+
+    fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=prices["timestamp"], y=prices["current_price"],
-        mode="lines+markers", name="Price",
-        line=dict(color="#2b6cb0"), marker=dict(size=9),
+        x=prices["date"], y=prices["close"],
+        mode="lines", name="Price", line=dict(color="#2b6cb0", width=1.5),
     ))
-    fig.add_hline(
-        y=row["ma_50"], line=dict(color="orange", dash="dash"),
-        annotation_text="MA 50", annotation_position="top left",
-    )
-    fig.add_hline(
-        y=row["ma_200"], line=dict(color="#1f4e79", dash="dot"),
-        annotation_text="MA 200", annotation_position="bottom left",
-    )
+    fig.add_trace(go.Scatter(
+        x=prices["date"], y=prices["ma_50"],
+        mode="lines", name="MA 50", line=dict(color="orange", width=1.8),
+    ))
+    fig.add_trace(go.Scatter(
+        x=prices["date"], y=prices["ma_200"],
+        mode="lines", name="MA 200", line=dict(color="#1f4e79", width=1.8),
+    ))
     fig.update_layout(
-        title=f"{symbol} - price vs moving averages",
-        xaxis_title="Snapshot", yaxis_title="Price ($)",
-        height=420, margin=dict(t=50, b=40),
+        title=f"{symbol} - price vs moving averages ({len(prices)} trading days)",
+        xaxis_title="Date", yaxis_title="Price ($)",
+        height=440, margin=dict(t=50, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        hovermode="x unified",
     )
     st.plotly_chart(fig, use_container_width=True)
-    if len(prices) < 2:
-        st.caption(
-            "Only one snapshot stored, so the price is a single point. "
-            "It becomes a real time series once ingestion runs repeatedly."
-        )
 
 
 def render_stats(df):

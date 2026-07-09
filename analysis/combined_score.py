@@ -89,12 +89,14 @@ JOIN (SELECT symbol, MAX(id) AS max_id FROM stocks GROUP BY symbol) l
 ORDER BY s.symbol;
 """
 
-# Full price history per symbol, oldest first (for RSI / trend when available).
+# Real daily close history per ticker, oldest first (for RSI / trend).
+# Populated by ingestion/ingest_prices.py; falls back to an empty series (and
+# thus a proxy RSI) if the table is absent or empty.
 PRICE_HISTORY_SQL = """
-SELECT symbol, current_price
-FROM stocks
-WHERE current_price IS NOT NULL
-ORDER BY symbol, id;
+SELECT ticker, close
+FROM price_history
+WHERE close IS NOT NULL
+ORDER BY ticker, date;
 """
 
 # Latest fundamental total_score per symbol.
@@ -200,9 +202,20 @@ def trend_points(price, ma_50, direction):
 # --- Data loading ----------------------------------------------------------
 
 def load_price_history(conn):
+    """Return {ticker: [close, ...]} oldest-first from price_history.
+
+    Returns an empty dict (RSI then falls back to a proxy) if the table has
+    not been created yet by ingestion/ingest_prices.py.
+    """
     history = {}
-    for symbol, price in conn.execute(PRICE_HISTORY_SQL):
-        history.setdefault(symbol, []).append(price)
+    try:
+        rows = conn.execute(PRICE_HISTORY_SQL)
+    except sqlite3.OperationalError:
+        logger.warning("price_history table missing - run ingestion/ingest_prices.py "
+                       "for real RSI. Falling back to proxy.")
+        return history
+    for ticker, close in rows:
+        history.setdefault(ticker, []).append(close)
     return history
 
 
