@@ -12,7 +12,6 @@ Run directly (see README for the cron setup):
 
 import logging
 import os
-import ssl
 import sqlite3
 import sys
 
@@ -23,48 +22,15 @@ if REPO_ROOT not in sys.path:
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
 DATA_DIR = os.path.dirname(DB_PATH)
 
+# Configure the CA bundle before importing yfinance so curl_cffi can verify
+# TLS on networks that intercept it (see ingestion/ssl_utils.py). Works whether
+# run as a script or imported as ingestion.ingest_prices.
+try:
+    from ingestion.ssl_utils import configure_ca_bundle
+except ImportError:
+    from ssl_utils import configure_ca_bundle
 
-def _configure_ca_bundle():
-    """Point yfinance/curl_cffi at a CA bundle it can actually verify against.
-
-    Many corporate networks intercept TLS with a proxy whose root CA lives only
-    in the Windows trust store, not in certifi -- which makes every yfinance
-    request fail with "unable to get local issuer certificate". We merge the
-    Windows ROOT/CA stores into certifi's bundle and export the environment
-    variables curl_cffi/requests read. On non-Windows (e.g. a Linux cron host)
-    we fall back to certifi alone.
-    """
-    try:
-        import certifi
-    except ImportError:
-        return
-
-    parts = [open(certifi.where(), "r", encoding="utf-8").read()]
-    if hasattr(ssl, "enum_certificates"):  # Windows only
-        for store in ("ROOT", "CA"):
-            try:
-                for cert, _enc, _trust in ssl.enum_certificates(store):
-                    try:
-                        parts.append(ssl.DER_cert_to_PEM_cert(cert))
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        bundle = os.path.join(DATA_DIR, "ca_bundle.pem")
-        with open(bundle, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(parts))
-    except OSError:
-        bundle = certifi.where()
-
-    for var in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
-        os.environ[var] = bundle
-
-
-# Must run before importing yfinance so curl_cffi picks up the bundle.
-_configure_ca_bundle()
+configure_ca_bundle(DATA_DIR)
 
 import numpy as np  # noqa: E402
 import yfinance as yf  # noqa: E402

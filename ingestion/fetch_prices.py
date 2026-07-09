@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch historical prices for a set of stocks and store metrics in PostgreSQL.
+"""Fetch historical prices for a set of stocks and store metrics in SQLite.
 
 Run directly:
     python ingestion/fetch_prices.py
@@ -7,7 +7,6 @@ Run directly:
 
 import logging
 import os
-import ssl
 import sqlite3
 import sys
 
@@ -16,48 +15,15 @@ import sys
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DATA_DIR, "marketdb.db")
 
+# Configure the CA bundle before importing yfinance so curl_cffi can verify
+# TLS on networks that intercept it (see ingestion/ssl_utils.py). Works whether
+# run as a script or imported as ingestion.fetch_prices.
+try:
+    from ingestion.ssl_utils import configure_ca_bundle
+except ImportError:
+    from ssl_utils import configure_ca_bundle
 
-def _configure_ca_bundle():
-    """Point yfinance/curl_cffi at a CA bundle it can actually verify against.
-
-    Many corporate networks intercept TLS with a proxy whose root CA lives only
-    in the Windows trust store, not in certifi -- which makes yfinance requests
-    fail (intermittently) with "unable to get local issuer certificate". We
-    merge the Windows ROOT/CA stores into certifi's bundle and export the
-    environment variables curl_cffi/requests read. On non-Windows (e.g. a Linux
-    cron host) we fall back to certifi alone.
-    """
-    try:
-        import certifi
-    except ImportError:
-        return
-
-    parts = [open(certifi.where(), "r", encoding="utf-8").read()]
-    if hasattr(ssl, "enum_certificates"):  # Windows only
-        for store in ("ROOT", "CA"):
-            try:
-                for cert, _enc, _trust in ssl.enum_certificates(store):
-                    try:
-                        parts.append(ssl.DER_cert_to_PEM_cert(cert))
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        bundle = os.path.join(DATA_DIR, "ca_bundle.pem")
-        with open(bundle, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(parts))
-    except OSError:
-        bundle = certifi.where()
-
-    for var in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
-        os.environ[var] = bundle
-
-
-# Must run before importing yfinance so curl_cffi picks up the bundle.
-_configure_ca_bundle()
+configure_ca_bundle(DATA_DIR)
 
 import numpy as np  # noqa: E402
 import yfinance as yf  # noqa: E402
