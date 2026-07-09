@@ -48,6 +48,9 @@ from ingestion.fetch_prices import SYMBOLS  # noqa: E402
 YAHOO_RSS_URL = "https://finance.yahoo.com/rss/headline?s={ticker}"
 FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/company-news"
 FINNHUB_LOOKBACK_DAYS = 7
+# Cap Finnhub news per ticker (keep the most recent) to protect the LLM quota.
+# Yahoo RSS is already ~20/ticker and needs no cap.
+FINNHUB_MAX_PER_TICKER = 20
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Finance-pipeline/1.0 (+news ingestion)"
 
@@ -137,8 +140,14 @@ def fetch_finnhub(ticker, session, api_key):
     resp.raise_for_status()
 
     data = resp.json()
+    if not isinstance(data, list):
+        data = []
+    # Keep only the most recent FINNHUB_MAX_PER_TICKER items.
+    data = sorted(data, key=lambda e: e.get("datetime") or 0, reverse=True)
+    data = data[:FINNHUB_MAX_PER_TICKER]
+
     items = []
-    for entry in data if isinstance(data, list) else []:
+    for entry in data:
         title = _clean(entry.get("headline"))
         if not title:
             continue
