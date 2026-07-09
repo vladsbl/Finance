@@ -150,7 +150,7 @@ def score_color(value):
 
 
 def render_top10(df):
-    st.subheader("1 - Top 10 Actions")
+    st.subheader("Top 10 Actions")
 
     table = df.head(10)[[
         "symbol", "final_score", "fundamental_score", "technical_score",
@@ -183,7 +183,7 @@ def render_top10(df):
 
 
 def render_detail(df):
-    st.subheader("2 - Detail d'une action")
+    st.subheader("Detail d'une action")
 
     symbols = df["symbol"].tolist()
     symbol = st.selectbox("Select a stock", symbols, key="detail_symbol")
@@ -216,7 +216,7 @@ def render_detail(df):
 
 
 def render_chart(df, history, symbol):
-    st.subheader("3 - Prix & moyennes mobiles")
+    st.subheader("Prix & moyennes mobiles")
     prices = history.get(symbol, pd.DataFrame())
 
     if prices.empty:
@@ -258,7 +258,7 @@ def render_chart(df, history, symbol):
 
 
 def render_stats(df):
-    st.subheader("4 - Statistiques globales")
+    st.subheader("Statistiques globales")
     best = df.iloc[0]
     worst = df.iloc[-1]
 
@@ -356,37 +356,61 @@ def render_news_page():
         st.divider()
 
 
-# --- Main ------------------------------------------------------------------
+# --- Pages ------------------------------------------------------------------
 
-def render_scores_page():
+def _get_scored_data():
+    """Load scored data or stop the page with an error banner."""
     df, history, error = load_data()
     if error:
         st.error(error)
         st.stop()
+    return df, history
 
+
+def page_overview():
+    """Top 10 ranking + global statistics."""
+    df, _ = _get_scored_data()
     render_top10(df)
-    st.divider()
-    symbol = render_detail(df)
-    st.divider()
-    render_chart(df, history, symbol)
     st.divider()
     render_stats(df)
 
+
+def page_stock():
+    """Per-stock detail + price/MA chart."""
+    df, history = _get_scored_data()
+    symbol = render_detail(df)
+    st.divider()
+    render_chart(df, history, symbol)
+
+
+def page_news():
+    """News feed with LLM analysis."""
+    render_news_page()
+
+
+# --- Main ------------------------------------------------------------------
 
 def main():
     st.set_page_config(page_title="Market Intelligence Dashboard", layout="wide")
     st.title("Market Intelligence Dashboard")
 
-    page = st.sidebar.radio("Navigation", ["Scores", "News & Analyse IA"])
-    if st.sidebar.button("Refresh Data"):
-        load_data.clear()
-        load_news.clear()
-        st.rerun()
+    pages = [
+        st.Page(page_overview, title="Vue d'ensemble", icon=":material/leaderboard:",
+                url_path="overview", default=True),
+        st.Page(page_stock, title="Analyse d'une action", icon=":material/query_stats:",
+                url_path="stock"),
+        st.Page(page_news, title="News & Analyse IA", icon=":material/newspaper:",
+                url_path="news"),
+    ]
+    nav = st.navigation(pages)
 
-    if page == "Scores":
-        render_scores_page()
-    else:
-        render_news_page()
+    with st.sidebar:
+        if st.button("Refresh Data"):
+            load_data.clear()
+            load_news.clear()
+            st.rerun()
+
+    nav.run()
 
 
 if __name__ == "__main__":
