@@ -23,6 +23,36 @@ The news + AI analysis steps need two API keys in `.env`:
 `GROQ_API_KEY` (see [News & AI analysis](#news--ai-analysis)) and
 `FINNHUB_API_KEY` (free key from <https://finnhub.io>).
 
+### Always activate the venv first
+
+**Every command (scripts and the dashboard) must run inside the `.venv`.** If
+you run `streamlit run dashboard/app.py` with the *system* Python instead, you
+get errors like `ModuleNotFoundError: No module named 'plotly'` because the
+dependencies live in the venv, not the global interpreter.
+
+Activate it in each new terminal before running anything:
+
+```bash
+# Windows - Git Bash
+source .venv/Scripts/activate
+# Windows - PowerShell / cmd
+.venv\Scripts\activate
+# macOS/Linux
+source .venv/bin/activate
+
+streamlit run dashboard/app.py
+```
+
+Alternatively, call the venv's interpreter explicitly without activating:
+
+```bash
+.venv/Scripts/python.exe -m streamlit run dashboard/app.py   # Windows
+.venv/bin/python -m streamlit run dashboard/app.py           # macOS/Linux
+```
+
+Your prompt should show `(.venv)` once activated. Check you're on the right
+interpreter with `which python` (Git Bash) / `where python` (cmd).
+
 ## Pipeline
 
 Run the steps in order (each reads/writes `data/marketdb.db`):
