@@ -75,6 +75,11 @@ PER_TICKER_SLEEP = 0.3  # be gentle with the feeds within a batch
 
 VALID_PRIORITIES = {"haute", "moyenne", "basse"}
 
+# Retry/backoff on Finnhub 429s -- same pattern as reasoning/analyze_news.py's
+# Groq retry (exponential backoff: 2, 4, 8, 16, 32s).
+MAX_RETRIES = 5
+BACKOFF_BASE = 2.0
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -191,6 +196,33 @@ def fetch_finnhub(ticker, session, api_key):
     return items
 
 
+def _is_rate_limit(exc):
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == 429 or "429" in str(exc) or "rate limit" in str(exc).lower()
+
+
+def fetch_finnhub_with_retry(ticker, session, api_key):
+    """fetch_finnhub with exponential backoff on 429 rate limits.
+
+    Finnhub's free tier enforces its own per-minute call rate independent of
+    Yahoo; hammering it sequentially across hundreds of US tickers triggers
+    429s well before the ticker list is exhausted. Same backoff pattern as
+    Groq's retry in reasoning/analyze_news.py (2, 4, 8, 16, 32s).
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            return fetch_finnhub(ticker, session, api_key)
+        except Exception as exc:  # noqa: BLE001
+            if _is_rate_limit(exc) and attempt < MAX_RETRIES - 1:
+                wait = BACKOFF_BASE * (2 ** attempt)
+                logger.warning("%s: Finnhub rate limit (429). Backoff %.0fs (try %d/%d)...",
+                               ticker, wait, attempt + 1, MAX_RETRIES)
+                time.sleep(wait)
+                continue
+            raise
+    return []
+
+
 def _parse_date(value):
     if not value:
         return None
@@ -255,7 +287,7 @@ def fetch_one(ticker, priorite, session, finnhub_key):
     # than waste a call that will 403 (see diagnostics report).
     if finnhub_key and priorite in FINNHUB_PRIORITIES:
         try:
-            finnhub_items = fetch_finnhub(ticker, session, finnhub_key)
+            finnhub_items = fetch_finnhub_with_retry(ticker, session, finnhub_key)
         except Exception as exc:  # noqa: BLE001
             logger.error("%s: Finnhub failed (%s)", ticker, exc)
 
