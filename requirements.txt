@@ -6,3 +6,5 @@ plotly
 groq
 python-dotenv
 requests
+networkx
+pyvis

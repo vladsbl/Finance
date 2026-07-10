@@ -35,7 +35,8 @@ Run the steps in order (each reads/writes `data/marketdb.db`):
 | 4. Combined score (fundamental + technical + volatility + volume) | `python analysis/combined_score.py` | `final_scores` |
 | 5. Fetch news (Yahoo RSS + Finnhub) | `python ingestion/fetch_news.py` | `news_raw` |
 | 6. Analyse news with LLM (Groq) | `python reasoning/analyze_news.py` | `news_analysis` |
-| 7. Dashboard | `streamlit run dashboard/app.py` | — |
+| 7. Import relations (knowledge graph seed) | `python graph/import_relations.py` | `relations` |
+| 8. Dashboard | `streamlit run dashboard/app.py` | — |
 
 The **RSI** and the dashboard **price/moving-average chart** are computed from
 the real daily closes stored in `price_history` by step 1. Without it, the RSI
@@ -114,6 +115,32 @@ python reasoning/analyze_news.py --limit 50                # cap this run
 The dashboard's **News & Analyse IA** page (sidebar navigation) shows, per
 ticker, the analysed headlines with a colour-coded tone, importance and impact
 summary.
+
+## Knowledge graph (relations)
+
+`data/relations_seed.csv` holds the known relations between tracked tickers and
+their suppliers / clients / competitors / partners. Columns:
+
+```
+source_ticker,relation_type,target_name,target_ticker,notes
+```
+
+`target_ticker` may be empty for external entities that we don't track (e.g. an
+unlisted supplier) — those become **external** nodes in the graph.
+
+To update the graph, edit the CSV and re-import:
+
+```bash
+# 1. Add/edit rows in data/relations_seed.csv
+python graph/import_relations.py     # upsert into the `relations` table
+```
+
+The import is **idempotent**: the upsert key is
+`(source_ticker, relation_type, target_name)`, so re-running only refreshes
+existing rows (target_ticker / notes) and adds new ones — no duplicates, safe to
+re-run any time. `graph/build_graph.py` builds a networkx graph from the table;
+the dashboard's **Knowledge Graph** page renders it interactively (pyvis) and
+lists each ticker's direct relations.
 
 ## Note on SSL / corporate networks
 

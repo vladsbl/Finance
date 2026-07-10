@@ -356,6 +356,79 @@ def render_news_page():
         st.divider()
 
 
+# --- Knowledge graph -------------------------------------------------------
+
+from graph.build_graph import build_graph, direct_relations  # noqa: E402
+from graph.build_graph import load_relations as _load_relation_rows  # noqa: E402
+
+
+@st.cache_data(show_spinner=False)
+def load_relations():
+    """Return relation rows (list of dicts); empty list if none/absent."""
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = _load_relation_rows(conn)
+        conn.close()
+    except (sqlite3.Error, pd.errors.DatabaseError):
+        return []
+    return rows
+
+
+def _graph_html(graph):
+    """Render the networkx graph to a self-contained interactive HTML (pyvis)."""
+    from pyvis.network import Network
+    net = Network(height="560px", width="100%", directed=True,
+                  cdn_resources="in_line", bgcolor="#ffffff",
+                  font_color="#222222")
+    net.repulsion(node_distance=160, spring_length=140)
+    for node, d in graph.nodes(data=True):
+        primary = d["kind"] == "primary"
+        title = f"{d['label']} ({d['ticker']})" if d["ticker"] else d["label"]
+        net.add_node(node, label=d["label"], title=title,
+                     color=COLOR_GOOD if primary else "#9aa0a6",
+                     size=26 if primary else 16)
+    for u, v, d in graph.edges(data=True):
+        net.add_edge(u, v, label=d["relation"], title=d.get("notes", ""))
+    return net.generate_html(notebook=False)
+
+
+def render_graph_page():
+    st.subheader("Knowledge Graph")
+    relations = load_relations()
+    if not relations:
+        st.info(
+            "Aucune relation enregistree. Lance "
+            "`python graph/import_relations.py`."
+        )
+        return
+
+    graph = build_graph(relations)
+    n_primary = sum(1 for _, d in graph.nodes(data=True) if d["kind"] == "primary")
+    n_external = graph.number_of_nodes() - n_primary
+    st.caption(f"{graph.number_of_nodes()} noeuds ({n_primary} suivis, "
+               f"{n_external} externes) - {graph.number_of_edges()} relations")
+
+    try:
+        import streamlit.components.v1 as components
+        components.html(_graph_html(graph), height=580, scrolling=False)
+    except Exception as exc:  # noqa: BLE001 - pyvis missing / render issue
+        st.warning(f"Graphe interactif indisponible ({exc}). "
+                   "Relations en texte ci-dessous.")
+
+    st.divider()
+    st.markdown("**Relations directes par ticker**")
+    tickers = sorted({r["source_ticker"].strip() for r in relations})
+    ticker = st.selectbox("Ticker", tickers, key="graph_ticker")
+    grouped = direct_relations(relations, ticker)
+    if not grouped:
+        st.write(f"{ticker} : aucune relation directe connue.")
+    else:
+        for rtype, names in grouped.items():
+            st.markdown(f"- **{rtype}** : {', '.join(names)}")
+
+
 # --- Pages ------------------------------------------------------------------
 
 def _get_scored_data():
@@ -388,6 +461,11 @@ def page_news():
     render_news_page()
 
 
+def page_graph():
+    """Knowledge graph of ticker relations."""
+    render_graph_page()
+
+
 # --- Main ------------------------------------------------------------------
 
 def main():
@@ -401,6 +479,8 @@ def main():
                 url_path="stock"),
         st.Page(page_news, title="News & Analyse IA", icon=":material/newspaper:",
                 url_path="news"),
+        st.Page(page_graph, title="Knowledge Graph", icon=":material/hub:",
+                url_path="graph"),
     ]
     nav = st.navigation(pages)
 
@@ -408,6 +488,7 @@ def main():
         if st.button("Refresh Data"):
             load_data.clear()
             load_news.clear()
+            load_relations.clear()
             st.rerun()
 
     nav.run()

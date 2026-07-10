@@ -1,0 +1,41 @@
+source_ticker,relation_type,target_name,target_ticker,notes
+NVDA,concurrent,AMD,AMD,Concurrent direct sur GPU/IA
+NVDA,concurrent,Intel,INTC,Concurrent sur puces IA/datacenter
+NVDA,fournisseur,TSMC,TSM,Fonderie principale des puces Nvidia
+NVDA,client,Microsoft,MSFT,Achete des GPU Nvidia pour Azure/OpenAI
+NVDA,client,Amazon,AMZN,Achete des GPU Nvidia pour AWS
+NVDA,client,Google,GOOGL,Achete des GPU Nvidia pour Google Cloud
+NVDA,client,Meta,META,Achete des GPU Nvidia pour l'entrainement IA
+AAPL,fournisseur,TSMC,TSM,Fabrique les puces A/M series
+AAPL,fournisseur,Foxconn,HNHPF,Assemblage principal des iPhone (Hon Hai Precision Industry)
+AAPL,concurrent,Samsung,SSNLF,Concurrent smartphones (non cote sous ce ticker US)
+MSFT,concurrent,Google,GOOGL,Concurrent cloud (Azure vs GCP) et IA
+MSFT,concurrent,Amazon,AMZN,Concurrent cloud (Azure vs AWS)
+MSFT,concurrent,Apple,AAPL,Concurrent OS/ecosysteme
+MSFT,client,Nvidia,NVDA,Achete des GPU pour Azure AI
+GOOGL,concurrent,Microsoft,MSFT,Concurrent cloud et IA
+GOOGL,concurrent,Amazon,AMZN,Concurrent cloud et publicite
+GOOGL,concurrent,Meta,META,Concurrent publicite digitale
+GOOGL,client,Nvidia,NVDA,Achete des GPU pour Google Cloud/IA
+AMZN,concurrent,Microsoft,MSFT,Concurrent cloud (AWS vs Azure)
+AMZN,concurrent,Google,GOOGL,Concurrent cloud (AWS vs GCP)
+AMZN,client,Nvidia,NVDA,Achete des GPU pour AWS
+META,concurrent,Google,GOOGL,Concurrent publicite digitale
+META,client,Nvidia,NVDA,Achete des GPU pour l'entrainement des modeles IA
+TSLA,concurrent,BYD,BYDDY,Premier concurrent mondial sur le marché des véhicules électriques
+TSLA,concurrent,Rivian,RIVN,Concurrent sur les pickups et SUV électriques.
+TSLA,concurrent,Ford,F,"Concurrence sur les véhicules électriques (Mustang Mach-E, F-150 Lightning)."
+TSLA,concurrent,General Motors,GM,Concurrent sur les plateformes EV Chevrolet/Cadillac.
+V,concurrent,Mastercard,MA,Concurrent direct reseaux de paiement
+V,partenaire,JPMorgan,JPM,JPM emet des cartes sur le reseau Visa
+JPM,partenaire,Visa,V,Emet des cartes sur le reseau Visa
+JPM,concurrent,Bank of America,BAC,Concurrent direct banque d'investissement et banque de détail.
+JPM,concurrent,Goldman Sachs,GS,Concurrent banque d'investissement et trading.
+JPM,concurrent,Morgan Stanley,MS ,Concurrent banque d'investissement et gestion d'actifs.
+JPM,concurrent,Citigroup,C,Concurrent banque mondiale.
+JPM,concurrent,Wells fargo,WFC,Concurrent banque de détail américaine.
+JNJ,concurrent,Pfizer,PFE,Concurrent pharmaceutique mondial.
+JNJ,concurrent,Merck & Co,MRK,Concurrent sur les médicaments innovants.
+JNJ,concurrent,AbbVie,ABBV,Concurrent immunologie et oncologie.
+JNJ,concurrent,Bristol Myers Squibb,BMY,Concurrent traitements innovants.
+JNJ,concurrent,Eli Lilly,LLY,Concurrent majeur en pharmacie et biotechnologies
