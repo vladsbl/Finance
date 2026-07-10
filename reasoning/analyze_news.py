@@ -38,6 +38,10 @@ from ingestion.ssl_utils import configure_ca_bundle  # noqa: E402
 
 CA_BUNDLE = configure_ca_bundle(DATA_DIR)
 
+# Local (no-LLM) importance scoring, used to order candidates before the daily
+# quota cap so the Groq budget goes to the news that matter most.
+from reasoning.prioritize_news import compute_scores as compute_priority_scores  # noqa: E402
+
 # --- Configuration ---------------------------------------------------------
 
 # Most recent capable model on the Groq free tier at time of writing.
@@ -285,6 +289,14 @@ def main(argv=None):
     rows = conn.execute(UNANALYSED_SQL).fetchall()
     if tickers:
         rows = [r for r in rows if r[1] in tickers]
+
+    # Order by descending local priority score (ticker priority, price move,
+    # volume anomaly, keywords, freshness, cross-source bonus -- see
+    # reasoning/prioritize_news.py) BEFORE the pre-filter, so that when the
+    # pre-filter drops a cross-source duplicate it keeps the higher-scored
+    # copy (it always keeps the first-seen occurrence per ticker).
+    priority_scores = {r["news_id"]: r["score"] for r in compute_priority_scores(conn)}
+    rows.sort(key=lambda r: priority_scores.get(r[0], 0.0), reverse=True)
 
     analysed_titles = load_analysed_titles(conn)
     kept, stats = prefilter(rows, analysed_titles)
