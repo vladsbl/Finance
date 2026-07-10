@@ -15,8 +15,11 @@ Kong, .SA Brazil, .SS/.SZ China, .NS India; US tickers use '-' not '.').
 
 Run:
     python universe/build_universe.py
+    python universe/build_universe.py --fix-only   # re-apply ticker fixes only
+                                                    # (no re-scraping / network)
 """
 
+import argparse
 import io
 import logging
 import os
@@ -157,6 +160,11 @@ def fetch_stoxx600(session):
             skipped += 1
             continue
         suffix, ccy = mapping
+        # Share-class tickers are scraped with a space (e.g. "ASSA B", "NDA FI")
+        # but Yahoo expects a dash ("ASSA-B.ST", "NDA-FI.HE"). See
+        # MANUAL_TICKER_FIXES below for the handful of exceptions this simple
+        # rule gets wrong (e.g. Novartis "NOV N" -> NOVN.SW, no separator).
+        base = base.replace(" ", "-")
         out.append(_row(base + suffix, r[name], ctry, "STOXX Europe 600", ccy))
     if skipped:
         logger.info("STOXX 600: %d constituents skipped (unmapped country).", skipped)
@@ -297,9 +305,66 @@ PRIORITY = {
 }
 
 
+# Manual corrections for tickers that are stale/mismatched on Yahoo even after
+# the automatic space->dash normalisation above. Discovered by running the
+# full 1912-ticker ingestion (see ingestion/ingest_universe_prices.py) and
+# empirically verifying each candidate replacement against live yfinance data
+# (not guessed from memory). Keyed by the ticker as it comes out of the
+# fetchers/normalisation (i.e. what would otherwise be stored), mapped to the
+# ticker that actually returns data on Yahoo. Applied last, in `_row()`, so it
+# overrides everything else.
+MANUAL_TICKER_FIXES = {
+    # Exceptions to the generic space->dash rule (registered/named shares use
+    # no separator on Yahoo, or a different base ticker entirely).
+    "NOV-N.SW": "NOVN.SW",       # Novartis: "N" registered share, no dash
+    "SWECO-B.ST": "SWEC-B.ST",   # Sweco: Yahoo base ticker is "SWEC", not "SWECO"
+    # Explicit examples: renamed / rebranded companies.
+    "VESTAS.CO": "VWS.CO",       # Vestas Wind Systems
+    "PANDORA.CO": "PNDORA.CO",   # Pandora A/S
+    # Same underlying pattern, dot (not space) used for the share class.
+    "BT.A.L": "BT-A.L",          # BT Group "A" shares
+    # UK: wrong/outdated ticker on the scraped Wikipedia page.
+    "GREG.L": "GRG.L",           # Greggs
+    "HLI.L": "HLN.L",            # Haleon
+    "IGGI.L": "IGG.L",           # IG Group
+    "INP.L": "INVP.L",           # Investec
+    "LII.L": "LBTYA",            # Liberty Global (Nasdaq-listed, no suffix)
+    "LIN.L": "LIN.DE",           # Linde plc (delisted from LSE, trades in Frankfurt)
+    "NGG.L": "NG.L",             # National Grid
+    "S4.L": "SFOR.L",            # S4 Capital
+    "TJW.L": "TW.L",             # Taylor Wimpey
+    "TPG.L": "TPT.L",            # Telecom Plus
+    "UPW.L": "UU.L",             # United Utilities
+    "FTI.L": "FTI",              # TechnipFMC (NYSE-listed, no suffix)
+    "ICP.L": "ICG.L",            # Intermediate Capital Group
+    "INDV.L": "INDV",            # Indivior (Nasdaq-listed, no suffix)
+    # Ireland: wrong/outdated ticker.
+    "FLTR.IR": "FLTR.L",         # Flutter Entertainment (primary listing moved to LSE)
+    "GFT.IR": "GFTU.L",          # Grafton Group
+    "GLB.IR": "GL9.IR",          # Glanbia
+    "SKG.IR": "SW",              # Smurfit Kappa -> Smurfit WestRock (NYSE, no suffix)
+    # Luxembourg: company is domiciled there but actually listed elsewhere.
+    "INPST.LU": "INPST.AS",      # InPost (Amsterdam)
+    "MT.LU": "MT.AS",            # ArcelorMittal (Amsterdam)
+    "TEN.LU": "TEN.MI",          # Tenaris (Milan)
+}
+
+# Tickers left unfixed on purpose: verified live against yfinance with several
+# plausible candidates, none returned data. These are recent (2021-2025)
+# de-listings via M&A / going-private / sanctions, not a mapping bug, so no
+# ticker correction exists:
+#   DLG.L (Direct Line, acquired by Aviva), EVR.L (Evraz, sanctions delisting),
+#   MRW.L (Wm Morrison, taken private 2021), ROL.L (Royal Mail/IDS, taken
+#   private 2025), SKY.L (Sky, acquired by Comcast 2018), SMDS.L (DS Smith,
+#   acquired by International Paper 2025), SXS.L (Spectris, PE takeover 2025),
+#   LIF.IR (unresolved).
+
+
 def _row(ticker, name, pays, indice, devise):
+    ticker = ticker.strip()
+    ticker = MANUAL_TICKER_FIXES.get(ticker, ticker)
     return {
-        "ticker": ticker.strip(),
+        "ticker": ticker,
         "nom": re.sub(r"\s+", " ", str(name)).strip(),
         "pays": pays,
         "indice_source": indice,
@@ -351,7 +416,59 @@ def dedup(rows):
     return out
 
 
+def normalize_stored_ticker(ticker):
+    """Apply the same space->dash rule + manual fixes to an already-stored
+    ticker, so corrections can be re-applied without re-scraping."""
+    candidate = ticker.replace(" ", "-")
+    return MANUAL_TICKER_FIXES.get(candidate, candidate)
+
+
+def fix_stored_tickers(conn):
+    """Rename already-stored tickers in place using the current corrections.
+
+    No network calls: works directly on the existing `universe` table. Used
+    both by --fix-only and after a fresh scrape, so a DB populated before a
+    correction was added can be fixed without a full re-scrape.
+    """
+    rows = conn.execute("SELECT ticker FROM universe").fetchall()
+    renamed, duplicates = 0, 0
+    for (old,) in rows:
+        new = normalize_stored_ticker(old)
+        if new == old:
+            continue
+        exists = conn.execute(
+            "SELECT 1 FROM universe WHERE ticker = ?", (new,)).fetchone()
+        if exists:
+            # The corrected ticker is already tracked under another index/
+            # listing (e.g. a company that changed primary listing after a
+            # merger) -> the old row is a pure duplicate, drop it.
+            logger.info("Drop duplicate %s: %s already tracked correctly.", old, new)
+            conn.execute("DELETE FROM universe WHERE ticker = ?", (old,))
+            duplicates += 1
+            continue
+        conn.execute("UPDATE universe SET ticker = ? WHERE ticker = ?", (new, old))
+        renamed += 1
+    conn.commit()
+    logger.info("Ticker corrections applied: %d renamed, %d duplicates removed.",
+                renamed, duplicates)
+    return renamed
+
+
 def main():
+    args = parse_args(sys.argv[1:])
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        ensure_schema(conn)
+    except sqlite3.Error as exc:
+        logger.error("Database error: %s", exc)
+        return 1
+
+    if args.fix_only:
+        fix_stored_tickers(conn)
+        conn.close()
+        return 0
+
     session = _session()
     all_rows = []
     for label, fetcher in FETCHERS:
@@ -364,22 +481,30 @@ def main():
 
     if not all_rows:
         logger.error("No constituents fetched. Aborting.")
+        conn.close()
         return 1
 
     unique = dedup(all_rows)
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-        ensure_schema(conn)
         conn.executemany(UPSERT_SQL, unique)
         conn.commit()
     except sqlite3.Error as exc:
         logger.error("Database error: %s", exc)
         return 1
 
+    fix_stored_tickers(conn)  # in case a scraped ticker still needs a fix
     _summary(conn, unique, len(all_rows))
     conn.close()
     return 0
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(description="Build/fix the ticker universe.")
+    p.add_argument("--fix-only", action="store_true",
+                   help="Re-apply ticker corrections to the existing table "
+                        "without re-scraping any index.")
+    return p.parse_args(argv)
 
 
 def _summary(conn, unique, raw_count):

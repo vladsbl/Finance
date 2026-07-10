@@ -212,9 +212,60 @@ Options:
 | `--retries N` | `3` | attempts per batch before giving up |
 
 Measured on subsets of 50 tickers (batch 25, pause 3s): ~5-6 s total,
-~0.12 s/ticker. A full ~1900-ticker run is therefore on the order of a few
-minutes — but that is many more batches hitting Yahoo back-to-back, so watch
-for rate limiting and raise `--pause` / lower `--batch-size` if needed.
+~0.12 s/ticker. Confirmed on the **full 1912-ticker universe** (batch 40,
+pause 5s): **387.5 s (~6.5 min)**, 1764/1912 tickers OK (92.3%), 0 failed
+batches, 0 rate-limit (429) errors — Yahoo did not throttle this run.
+
+### Ticker normalisation for European share classes
+
+Running the full universe revealed that some STOXX Europe 600 tickers scraped
+from Wikipedia use a **space** for share-class suffixes (e.g. `"ASSA B"`,
+`"NDA FI"`), while Yahoo Finance expects a **dash** (`ASSA-B.ST`, `NDA-FI.HE`).
+`build_universe.py` now normalises this automatically (`fetch_stoxx600`
+replaces the space with a dash before appending the exchange suffix).
+
+A handful of tickers don't fit that simple rule — either the space-to-dash
+substitution still isn't what Yahoo expects (e.g. Novartis' registered share
+`"NOV N"` is `NOVN.SW` on Yahoo, no separator at all), or the ticker scraped
+from Wikipedia is simply stale/wrong (renamed company, moved primary listing,
+post-merger ticker change). These are listed in the `MANUAL_TICKER_FIXES` dict
+in `universe/build_universe.py`, applied last (after the automatic
+normalisation) — **every entry was verified against live Yahoo data before
+being added**, not guessed from memory. A few tickers are left uncorrected on
+purpose because no valid Yahoo ticker exists: they were recently delisted via
+M&A / going-private / sanctions (e.g. Wm Morrison, Sky, Direct Line) — see the
+comment above `MANUAL_TICKER_FIXES` for the full list and reasons.
+
+To re-apply ticker corrections to an already-populated `universe` table
+**without re-scraping** any index (e.g. after adding a new fix to the dict):
+
+```bash
+python universe/build_universe.py --fix-only
+```
+
+This renames tickers in place and drops rows that turn out to be duplicates of
+an already-correctly-tracked ticker (e.g. a company that changed its primary
+listing after a merger). It is idempotent — running it again does nothing.
+
+**Measured impact** (targeted re-ingestion of the affected countries, before
+the fix vs. after):
+
+| Country | Before | After |
+|---------|--------|-------|
+| Sweden | 11/32 (34.4%) | 24/32 (75.0%) |
+| Denmark | 4/10 (40.0%) | 9/10 (90.0%) |
+| United Kingdom | 102/124 (82.3%) | 116/123 (94.3%) |
+| Ireland | 0/5 (0.0%) | 3/4 (75.0%) |
+| Luxembourg | 0/3 (0.0%) | 3/3 (100.0%) |
+| Brazil | 66/88 (75.0%) | 66/88 (75.0%) *(out of scope, unchanged)* |
+| **Total (6 countries)** | **183/262 (69.8%)** | **221/260 (85.0%)** |
+
+Brazil failures were left untouched (not part of the identified space/stale-
+ticker pattern investigated here). A few Swedish tickers (e.g. `ERICB.ST`,
+`HMB.ST`, `ATCOA.ST`) turned out to have the *same underlying* Yahoo-ticker
+mismatch but with **no space at all** in the Wikipedia source (so the
+space-to-dash rule never triggers) — a related but distinct data-quality issue
+in the source table, left for a future pass.
 
 ## Note on SSL / corporate networks
 
