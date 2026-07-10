@@ -172,6 +172,50 @@ re-run any time. `graph/build_graph.py` builds a networkx graph from the table;
 the dashboard's **Knowledge Graph** page renders it interactively (pyvis) and
 lists each ticker's direct relations.
 
+## Large-scale universe (1900+ tickers)
+
+`universe/build_universe.py` aggregates the constituents of 8 world indices
+into the `universe` table (`ticker, nom, pays, indice_source, devise,
+priorite`). Each ticker gets an ingestion **priority** based on data-source
+coverage:
+
+| priorite | Indices | Coverage |
+|----------|---------|----------|
+| `haute` | S&P 500 (US) | yfinance + Finnhub + Yahoo RSS |
+| `moyenne` | STOXX 600, Nikkei 225, KOSPI 200, Hang Seng, B3 | yfinance + RSS |
+| `basse` | CSI 300, Nifty 50 | mostly yfinance only |
+
+### Batch price ingestion — `ingest_universe_prices.py`
+
+Downloads daily OHLCV in **batches** via `yf.download` (not one ticker at a
+time), pausing between batches and retrying with exponential backoff on
+errors / rate limits. Rows go into the shared `price_history` table (idempotent
+on `(ticker, date)`).
+
+```bash
+# Always test on a subset first:
+python ingestion/ingest_universe_prices.py --priorite haute  --limit 50
+python ingestion/ingest_universe_prices.py --priorite moyenne --limit 50
+# Full run (only once you're confident):
+python ingestion/ingest_universe_prices.py --priorite toutes
+```
+
+Options:
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--priorite` | `toutes` | `haute` / `moyenne` / `basse` / `toutes` |
+| `--limit N` | none | cap the number of tickers (for testing) |
+| `--batch-size N` | `50` | tickers per `yf.download` call |
+| `--pause S` | `3.0` | seconds slept between batches (throttle) |
+| `--period P` | `1y` | yfinance history period |
+| `--retries N` | `3` | attempts per batch before giving up |
+
+Measured on subsets of 50 tickers (batch 25, pause 3s): ~5-6 s total,
+~0.12 s/ticker. A full ~1900-ticker run is therefore on the order of a few
+minutes — but that is many more batches hitting Yahoo back-to-back, so watch
+for rate limiting and raise `--pause` / lower `--batch-size` if needed.
+
 ## Note on SSL / corporate networks
 
 The ingestion scripts call `ingestion/ssl_utils.py:configure_ca_bundle()` before

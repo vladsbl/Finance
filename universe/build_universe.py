@@ -281,6 +281,22 @@ FETCHERS = [
 ]
 
 
+# Ingestion priority per index, driven by data-source coverage:
+#   haute   = US, full coverage (yfinance + Finnhub + Yahoo RSS)
+#   moyenne = developed intl (yfinance + RSS, no Finnhub free coverage)
+#   basse   = China / India (mostly yfinance only)
+PRIORITY = {
+    "S&P 500": "haute",
+    "STOXX Europe 600": "moyenne",
+    "Nikkei 225": "moyenne",
+    "KOSPI 200": "moyenne",
+    "Hang Seng": "moyenne",
+    "B3 (Brazil)": "moyenne",
+    "CSI 300": "basse",
+    "Nifty 50": "basse",
+}
+
+
 def _row(ticker, name, pays, indice, devise):
     return {
         "ticker": ticker.strip(),
@@ -288,6 +304,7 @@ def _row(ticker, name, pays, indice, devise):
         "pays": pays,
         "indice_source": indice,
         "devise": devise,
+        "priorite": PRIORITY.get(indice, "moyenne"),
     }
 
 
@@ -299,17 +316,28 @@ CREATE TABLE IF NOT EXISTS universe (
     nom           TEXT,
     pays          TEXT,
     indice_source TEXT,
-    devise        TEXT
+    devise        TEXT,
+    priorite      TEXT
 );
 """
 
 UPSERT_SQL = """
-INSERT INTO universe (ticker, nom, pays, indice_source, devise)
-VALUES (:ticker, :nom, :pays, :indice_source, :devise)
+INSERT INTO universe (ticker, nom, pays, indice_source, devise, priorite)
+VALUES (:ticker, :nom, :pays, :indice_source, :devise, :priorite)
 ON CONFLICT(ticker) DO UPDATE SET
     nom = excluded.nom, pays = excluded.pays,
-    indice_source = excluded.indice_source, devise = excluded.devise;
+    indice_source = excluded.indice_source, devise = excluded.devise,
+    priorite = excluded.priorite;
 """
+
+
+def ensure_schema(conn):
+    """Create the table and add the priorite column if an older DB lacks it."""
+    conn.execute(CREATE_TABLE_SQL)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(universe)")}
+    if "priorite" not in cols:
+        conn.execute("ALTER TABLE universe ADD COLUMN priorite TEXT")
+    conn.commit()
 
 
 def dedup(rows):
@@ -342,7 +370,7 @@ def main():
 
     try:
         conn = sqlite3.connect(DB_PATH)
-        conn.execute(CREATE_TABLE_SQL)
+        ensure_schema(conn)
         conn.executemany(UPSERT_SQL, unique)
         conn.commit()
     except sqlite3.Error as exc:
