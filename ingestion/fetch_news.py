@@ -1,20 +1,37 @@
 #!/usr/bin/env python3
-"""Fetch recent news per ticker from two sources and store them in SQLite.
+"""Fetch recent news per ticker from the tracked universe and store them in SQLite.
 
-Sources:
+Sources (chosen per ticker's ingestion priority, from the ``universe`` table):
   * Yahoo Finance RSS feed (https://finance.yahoo.com/rss/headline?s=TICKER)
+    -- used for every ticker, all priorities.
   * Finnhub /company-news REST API (last 7 days)
+    -- US-only (``priorite = haute``): Finnhub's free tier returns HTTP 403 on
+    non-US tickers (see diagnostics/international_coverage_report.md), so
+    ``moyenne``/``basse`` tickers skip it entirely rather than waste calls.
 
 The two sources are merged and de-duplicated (by URL, falling back to a
 normalised title), then upserted into the ``news_raw`` table. Re-running is
 idempotent thanks to a UNIQUE(ticker, dedup_key) index.
 
-Run directly:
-    python ingestion/fetch_news.py
+Tickers are read from the ``universe`` table (populated by
+universe/build_universe.py), processed in BATCHES with a pause between
+batches to avoid hammering Yahoo's RSS feed across ~1900 tickers at once.
+
+Usage:
+    python ingestion/fetch_news.py --priorite haute  --limit 100
+    python ingestion/fetch_news.py --priorite moyenne --limit 100
+    python ingestion/fetch_news.py --priorite toutes            # full universe
+
+Options:
+    --priorite   haute | moyenne | basse | toutes   (default: toutes)
+    --limit N    cap the number of tickers processed (default: no cap)
+    --batch-size N   tickers per batch (default: 50)
+    --pause S    seconds slept between batches (default: 3.0)
 
 Requires FINNHUB_API_KEY in the environment / .env (Yahoo RSS needs no key).
 """
 
+import argparse
 import logging
 import os
 import re
@@ -43,16 +60,20 @@ configure_ca_bundle(DATA_DIR)
 import requests  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
-from ingestion.fetch_prices import SYMBOLS  # noqa: E402
-
 YAHOO_RSS_URL = "https://finance.yahoo.com/rss/headline?s={ticker}"
 FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/company-news"
 FINNHUB_LOOKBACK_DAYS = 7
 # Cap Finnhub news per ticker (keep the most recent) to protect the LLM quota.
 # Yahoo RSS is already ~20/ticker and needs no cap.
 FINNHUB_MAX_PER_TICKER = 20
+# Finnhub free tier only covers US tickers (HTTP 403 elsewhere) -- see
+# diagnostics/international_coverage_report.md. Only these priorities call it.
+FINNHUB_PRIORITIES = {"haute"}
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Finance-pipeline/1.0 (+news ingestion)"
+PER_TICKER_SLEEP = 0.3  # be gentle with the feeds within a batch
+
+VALID_PRIORITIES = {"haute", "moyenne", "basse"}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -198,7 +219,63 @@ def ensure_table(conn):
     conn.commit()
 
 
-def main():
+def load_tickers(conn, priorite, limit):
+    """Return [(ticker, priorite), ...] from the universe table.
+
+    Mirrors ingestion/ingest_universe_prices.py's --priorite/--limit contract
+    for consistency across the two large-scale ingestion scripts.
+    """
+    if priorite == "toutes":
+        sql = "SELECT ticker, priorite FROM universe ORDER BY priorite, ticker"
+        params = ()
+    else:
+        sql = "SELECT ticker, priorite FROM universe WHERE priorite = ? ORDER BY ticker"
+        params = (priorite,)
+    rows = conn.execute(sql, params).fetchall()
+    if limit is not None:
+        rows = rows[:limit]
+    return rows
+
+
+def _chunks(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def fetch_one(ticker, priorite, session, finnhub_key):
+    """Fetch + merge news for a single ticker. Returns (merged_items, stats)."""
+    yahoo_items, finnhub_items = [], []
+
+    try:
+        yahoo_items = fetch_yahoo_rss(ticker, session)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("%s: Yahoo RSS failed (%s)", ticker, exc)
+
+    # Finnhub free tier is US-only; skip it for international tickers rather
+    # than waste a call that will 403 (see diagnostics report).
+    if finnhub_key and priorite in FINNHUB_PRIORITIES:
+        try:
+            finnhub_items = fetch_finnhub(ticker, session, finnhub_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("%s: Finnhub failed (%s)", ticker, exc)
+
+    merged = merge_dedup(yahoo_items, finnhub_items)
+    return merged, len(yahoo_items), len(finnhub_items)
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(description="Batch universe news ingestion.")
+    p.add_argument("--priorite", default="toutes",
+                   choices=["haute", "moyenne", "basse", "toutes"])
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--batch-size", type=int, default=50)
+    p.add_argument("--pause", type=float, default=3.0)
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv or sys.argv[1:])
+
     load_dotenv()
     finnhub_key = os.getenv("FINNHUB_API_KEY")
     if not finnhub_key:
@@ -212,47 +289,64 @@ def main():
         logger.error("Database error: %s", exc)
         return 1
 
+    try:
+        tickers = load_tickers(conn, args.priorite, args.limit)
+    except sqlite3.Error as exc:
+        logger.error("Could not read universe (run universe/build_universe.py): %s", exc)
+        conn.close()
+        return 1
+
+    if not tickers:
+        logger.warning("No tickers for priorite=%s. Nothing to do.", args.priorite)
+        conn.close()
+        return 1
+
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
 
-    total_inserted = 0
-    for ticker in SYMBOLS:
-        yahoo_items, finnhub_items = [], []
+    batches = list(_chunks(tickers, args.batch_size))
+    logger.info("Priorite=%s | %d tickers | %d batch(es) of %d | pause=%ss",
+                args.priorite, len(tickers), len(batches), args.batch_size,
+                args.pause)
 
-        try:
-            yahoo_items = fetch_yahoo_rss(ticker, session)
-        except Exception as exc:
-            logger.error("%s: Yahoo RSS failed (%s)", ticker, exc)
+    start = time.time()
+    total_inserted = total_yahoo = total_finnhub = 0
 
-        if finnhub_key:
-            try:
-                finnhub_items = fetch_finnhub(ticker, session, finnhub_key)
-            except Exception as exc:
-                logger.error("%s: Finnhub failed (%s)", ticker, exc)
+    for b_i, batch in enumerate(batches, start=1):
+        b_start = time.time()
+        batch_inserted = 0
+        for ticker, priorite in batch:
+            merged, n_yahoo, n_finnhub = fetch_one(ticker, priorite, session, finnhub_key)
+            total_yahoo += n_yahoo
+            total_finnhub += n_finnhub
 
-        merged = merge_dedup(yahoo_items, finnhub_items)
-        if not merged:
-            logger.info("%-6s no news", ticker)
-            continue
+            if merged:
+                try:
+                    cur = conn.executemany(INSERT_SQL, merged)
+                    conn.commit()
+                    inserted = cur.rowcount if cur.rowcount is not None else 0
+                except sqlite3.Error as exc:
+                    conn.rollback()
+                    logger.error("%s: insert failed (%s)", ticker, exc)
+                    inserted = 0
+                batch_inserted += max(inserted, 0)
 
-        try:
-            cur = conn.executemany(INSERT_SQL, merged)
-            conn.commit()
-            inserted = cur.rowcount if cur.rowcount is not None else 0
-        except sqlite3.Error as exc:
-            conn.rollback()
-            logger.error("%s: insert failed (%s)", ticker, exc)
-            continue
+            time.sleep(PER_TICKER_SLEEP)
 
-        total_inserted += max(inserted, 0)
-        logger.info("%-6s yahoo=%d finnhub=%d merged=%d new=%d",
-                    ticker, len(yahoo_items), len(finnhub_items),
-                    len(merged), max(inserted, 0))
-        # Be gentle with the feeds.
-        time.sleep(0.3)
+        total_inserted += batch_inserted
+        logger.info("Batch %d/%d: %d tickers, %d new rows, %.1fs",
+                    b_i, len(batches), len(batch), batch_inserted,
+                    time.time() - b_start)
+        if b_i < len(batches):
+            time.sleep(args.pause)
 
+    elapsed = time.time() - start
     conn.close()
-    logger.info("Done. %d new news rows inserted.", total_inserted)
+
+    logger.info("=" * 52)
+    logger.info("Done in %.1fs. %d tickers | yahoo=%d finnhub=%d fetched | "
+                "%d new rows inserted.", elapsed, len(tickers), total_yahoo,
+                total_finnhub, total_inserted)
     return 0
 
 
