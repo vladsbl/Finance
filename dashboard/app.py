@@ -32,6 +32,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from analysis.combined_score import compute_rsi, proxy_rsi  # noqa: E402
+from reasoning.daily_summary import MIN_CONFIDENCE, build_daily_summary  # noqa: E402
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
 
@@ -543,6 +544,80 @@ def render_opportunities_page():
     st.write(row["explication"])
 
 
+# --- Resume du jour ----------------------------------------------------------
+
+RISK_COLOR = {"Faible": COLOR_GOOD, "Modere": COLOR_MID, "Eleve": COLOR_BAD}
+
+
+@st.cache_data(show_spinner=False)
+def load_daily_summary():
+    """Return (signals, today, n_candidates, error)."""
+    if not os.path.exists(DB_PATH):
+        return [], None, 0, None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        signals, today, n_candidates = build_daily_summary(conn)
+        conn.close()
+    except sqlite3.Error as exc:
+        return [], None, 0, str(exc)
+    return signals, today, n_candidates, None
+
+
+def render_daily_summary_page():
+    st.subheader("Resume du jour")
+    signals, today, n_candidates, error = load_daily_summary()
+    if error:
+        st.error(error)
+        return
+    if today is None:
+        st.info(
+            "Aucune opportunite calculee pour l'instant. Lance "
+            "`python reasoning/opportunity_scoring.py --priorite haute` "
+            "puis reviens sur cette page."
+        )
+        return
+
+    st.caption(
+        f"{today} - {len(signals)} signal(aux) retenu(s) sur {n_candidates} "
+        f"candidat(s) eligible(s) (confiance >= {MIN_CONFIDENCE:.0f}%)"
+    )
+
+    if not signals:
+        st.warning(
+            "Aucun signal ne depasse le seuil de confiance minimal aujourd'hui. "
+            "Qualite avant quantite : mieux vaut aucun signal qu'un mauvais "
+            "choix force."
+        )
+        return
+
+    for rank, s in enumerate(signals, start=1):
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([2, 1, 1])
+            c1.markdown(f"### #{rank}  {s['ticker']}")
+            c2.metric("Score ajuste", f"{s['score_ajuste']:.1f}",
+                      help="score_global x (confiance / 100)")
+            c3.metric("Confiance", f"{s['confiance']:.0f}%")
+
+            risk_bg = RISK_COLOR.get(s["risque"], COLOR_MID)
+            conflict_note = " - fondamental/technique en contradiction" if s["conflit_composantes"] else ""
+            st.markdown(
+                f"<span style='background-color:{risk_bg};color:white;"
+                f"padding:2px 10px;border-radius:12px;font-size:0.85em'>"
+                f"Risque : {s['risque']}</span>"
+                f"<span style='font-size:0.85em;color:gray;'>{conflict_note}</span>",
+                unsafe_allow_html=True,
+            )
+            st.caption(s["horizon"])
+            st.write(s["explication"])
+            if s["volatilite"] is not None:
+                st.caption(f"Volatilite annualisee : {s['volatilite']:.0%}")
+
+            if s["entreprises_a_surveiller"]:
+                st.markdown("**Entreprises a surveiller**")
+                for rtype, names in s["entreprises_a_surveiller"].items():
+                    st.markdown(f"- **{rtype}** : {', '.join(names)}")
+
+
 # --- Pages ------------------------------------------------------------------
 
 def _get_scored_data():
@@ -552,6 +627,11 @@ def _get_scored_data():
         st.error(error)
         st.stop()
     return df, history
+
+
+def page_daily_summary():
+    """Today's strongest advisory signals (fundamental+technical+news, no LLM)."""
+    render_daily_summary_page()
 
 
 def page_overview():
@@ -592,8 +672,10 @@ def main():
     st.title("Market Intelligence Dashboard")
 
     pages = [
+        st.Page(page_daily_summary, title="Resume du jour", icon=":material/bolt:",
+                url_path="daily-summary", default=True),
         st.Page(page_overview, title="Vue d'ensemble", icon=":material/leaderboard:",
-                url_path="overview", default=True),
+                url_path="overview"),
         st.Page(page_stock, title="Analyse d'une action", icon=":material/query_stats:",
                 url_path="stock"),
         st.Page(page_news, title="News & Analyse IA", icon=":material/newspaper:",
@@ -612,6 +694,7 @@ def main():
             load_relations.clear()
             load_opportunites.clear()
             load_universe_priorities.clear()
+            load_daily_summary.clear()
             st.rerun()
 
     nav.run()

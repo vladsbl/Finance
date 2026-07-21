@@ -49,6 +49,45 @@ def _run_page_opportunities():
     app.page_opportunities()
 
 
+def _run_page_daily_summary():
+    import dashboard.app as app
+    app.page_daily_summary()
+
+
+def _run_page_daily_summary_zero_signals():
+    # Force the 0-signal path through the real page code: build_daily_summary
+    # looks up MIN_CONFIDENCE as a module-global at call time, so patching it
+    # on reasoning.daily_summary (not on dashboard.app's already-imported copy,
+    # which is display-only) genuinely makes every candidate ineligible.
+    # load_daily_summary's @st.cache_data cache can persist across separate
+    # AppTest runs within the same pytest process, so it must be cleared here
+    # too, or a previous test's cached (non-empty) result would be reused.
+    import dashboard.app as app
+    import reasoning.daily_summary as ds
+    ds.MIN_CONFIDENCE = 101.0  # impossible threshold -> guarantees 0 signals
+    app.load_daily_summary.clear()
+    app.page_daily_summary()
+
+
+def test_page_daily_summary_loads_without_error():
+    """'Resume du jour' (new default homepage) must render cleanly."""
+    at = AppTest.from_function(_run_page_daily_summary, default_timeout=60).run()
+    assert not at.exception, f"page_daily_summary raised: {list(at.exception)}"
+    subheaders = [s.value for s in at.subheader]
+    assert "Resume du jour" in subheaders
+
+
+def test_page_daily_summary_handles_zero_signals_without_crash():
+    """When no ticker clears the confidence threshold, the page must show a
+    clear message instead of crashing (quality-over-quantity is a feature)."""
+    at = AppTest.from_function(_run_page_daily_summary_zero_signals, default_timeout=60).run()
+    assert not at.exception, f"page_daily_summary raised: {list(at.exception)}"
+    warnings = [w.value for w in at.warning]
+    assert any("Aucun signal" in w for w in warnings), (
+        f"Expected a 'no signal' warning, got warnings: {warnings}"
+    )
+
+
 def test_page_opportunities_loads_without_error():
     """The new 'Opportunites du jour' page (module 9 v1) must render cleanly."""
     at = AppTest.from_function(_run_page_opportunities, default_timeout=60).run()
