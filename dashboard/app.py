@@ -429,6 +429,94 @@ def render_graph_page():
             st.markdown(f"- **{rtype}** : {', '.join(names)}")
 
 
+# --- Opportunites du jour ---------------------------------------------------
+
+OPPORTUNITES_SQL = """
+SELECT o.ticker, o.score_global, o.score_fondamental, o.score_technique,
+       o.score_news, o.explication, o.confiance, o.date_calcul, u.priorite
+FROM opportunites o
+JOIN universe u ON u.ticker = o.ticker
+WHERE o.date_calcul = (SELECT MAX(date_calcul) FROM opportunites)
+ORDER BY (o.score_global IS NULL), o.score_global DESC;
+"""
+
+
+@st.cache_data(show_spinner=False)
+def load_opportunites():
+    """Return (df, error). Empty df (no error) if the table doesn't exist yet."""
+    if not os.path.exists(DB_PATH):
+        return pd.DataFrame(), None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df = pd.read_sql_query(OPPORTUNITES_SQL, conn)
+        conn.close()
+    except (sqlite3.Error, pd.errors.DatabaseError):
+        return pd.DataFrame(), None
+    return df, None
+
+
+def render_opportunities_page():
+    st.subheader("Opportunites du jour")
+    df, error = load_opportunites()
+    if error:
+        st.error(error)
+        return
+    if df.empty:
+        st.info(
+            "Aucune opportunite calculee. Lance "
+            "`python reasoning/opportunity_scoring.py --priorite haute`."
+        )
+        return
+
+    st.caption(f"Calcule le {df['date_calcul'].iloc[0]} - {len(df)} tickers")
+
+    priorites = ["toutes"] + sorted(df["priorite"].dropna().unique().tolist())
+    choice = st.selectbox("Priorite univers", priorites, key="opp_priorite")
+    sub = df if choice == "toutes" else df[df["priorite"] == choice]
+
+    table = sub[[
+        "ticker", "priorite", "score_global", "score_fondamental",
+        "score_technique", "score_news", "confiance",
+    ]].rename(columns={
+        "ticker": "Ticker", "priorite": "Priorite",
+        "score_global": "Score global", "score_fondamental": "Fondamental",
+        "score_technique": "Technique", "score_news": "News",
+        "confiance": "Confiance",
+    })
+
+    def color_row(row):
+        bg = score_color(row["Score global"])
+        return [f"background-color: {bg}; color: white;"] * len(row)
+
+    styled = (
+        table.style
+        .apply(color_row, axis=1)
+        .format({
+            "Score global": "{:.1f}", "Fondamental": "{:.1f}",
+            "Technique": "{:.1f}", "News": "{:.1f}", "Confiance": "{:.0f}%",
+        }, na_rep="n/a")
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.caption("Trie par score global decroissant. "
+               "Vert: score > 60 - Orange: 40-60 - Rouge: < 40")
+
+    st.divider()
+    st.markdown("**Explication detaillee par ticker**")
+    tickers = sub["ticker"].tolist()
+    if not tickers:
+        st.write("Aucun ticker pour cette priorite.")
+        return
+    ticker = st.selectbox("Ticker", tickers, key="opp_ticker")
+    row = sub[sub["ticker"] == ticker].iloc[0]
+
+    c1, c2, c3 = st.columns(3)
+    score = row["score_global"]
+    c1.metric("Score global", f"{score:.1f}" if pd.notna(score) else "n/a")
+    c2.metric("Confiance", f"{row['confiance']:.0f}%")
+    c3.metric("Priorite univers", row["priorite"])
+    st.write(row["explication"])
+
+
 # --- Pages ------------------------------------------------------------------
 
 def _get_scored_data():
@@ -466,6 +554,11 @@ def page_graph():
     render_graph_page()
 
 
+def page_opportunities():
+    """Aggregated opportunity scores (fundamental + technical + news, no LLM)."""
+    render_opportunities_page()
+
+
 # --- Main ------------------------------------------------------------------
 
 def main():
@@ -481,6 +574,8 @@ def main():
                 url_path="news"),
         st.Page(page_graph, title="Knowledge Graph", icon=":material/hub:",
                 url_path="graph"),
+        st.Page(page_opportunities, title="Opportunites du jour",
+                icon=":material/trending_up:", url_path="opportunities"),
     ]
     nav = st.navigation(pages)
 
@@ -489,6 +584,7 @@ def main():
             load_data.clear()
             load_news.clear()
             load_relations.clear()
+            load_opportunites.clear()
             st.rerun()
 
     nav.run()

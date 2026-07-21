@@ -9,3 +9,4 @@ requests
 networkx
 pyvis
 lxml
+pytest
