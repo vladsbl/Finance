@@ -455,6 +455,25 @@ def load_opportunites():
     return df, None
 
 
+@st.cache_data(show_spinner=False)
+def load_universe_priorities():
+    """All distinct priorite values in universe (not just the ones already
+    scored in `opportunites`), so the filter always offers every tier even
+    before opportunity_scoring.py has been run for it."""
+    if not os.path.exists(DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT DISTINCT priorite FROM universe "
+            "WHERE priorite IS NOT NULL ORDER BY priorite"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return []
+    return [r[0] for r in rows]
+
+
 def render_opportunities_page():
     st.subheader("Opportunites du jour")
     df, error = load_opportunites()
@@ -470,9 +489,16 @@ def render_opportunities_page():
 
     st.caption(f"Calcule le {df['date_calcul'].iloc[0]} - {len(df)} tickers")
 
-    priorites = ["toutes"] + sorted(df["priorite"].dropna().unique().tolist())
+    priorites = ["toutes"] + load_universe_priorities()
     choice = st.selectbox("Priorite univers", priorites, key="opp_priorite")
     sub = df if choice == "toutes" else df[df["priorite"] == choice]
+
+    if sub.empty:
+        st.warning(
+            f"Aucune opportunite calculee pour la priorite '{choice}'. "
+            f"Lance `python reasoning/opportunity_scoring.py --priorite {choice}`."
+        )
+        return
 
     table = sub[[
         "ticker", "priorite", "score_global", "score_fondamental",
@@ -585,6 +611,7 @@ def main():
             load_news.clear()
             load_relations.clear()
             load_opportunites.clear()
+            load_universe_priorities.clear()
             st.rerun()
 
     nav.run()

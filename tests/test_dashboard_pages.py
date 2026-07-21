@@ -57,6 +57,37 @@ def test_page_opportunities_loads_without_error():
     assert "Opportunites du jour" in subheaders
 
 
+def test_opportunities_priority_filter_changes_row_count():
+    """Regression test: the 'Priorite univers' filter must offer every real
+    universe.priorite value (not just a subset seen in already-computed
+    opportunites rows) and must actually narrow the displayed table when a
+    tier is selected, rather than always showing every row."""
+    at = AppTest.from_function(_run_page_opportunities, default_timeout=60).run()
+    assert not at.exception, f"page_opportunities raised: {list(at.exception)}"
+
+    sb = at.selectbox(key="opp_priorite")
+    options = set(sb.options)
+    assert {"haute", "moyenne", "basse"}.issubset(options), (
+        f"Expected haute/moyenne/basse all offered, got: {options}"
+    )
+
+    counts = {}
+    for choice in sb.options:
+        run = AppTest.from_function(_run_page_opportunities, default_timeout=60).run()
+        run.selectbox(key="opp_priorite").set_value(choice).run()
+        assert not run.exception, f"[{choice}] raised: {list(run.exception)}"
+        counts[choice] = len(run.dataframe[0].value) if run.dataframe else 0
+
+    total = counts.get("toutes")
+    others = [n for k, n in counts.items() if k != "toutes"]
+    assert total == sum(others), (
+        f"'toutes' ({total}) should equal the sum of every tier ({others}): {counts}"
+    )
+    assert len(set(counts.values())) > 1, (
+        f"Selecting a priority had no effect on the row count: {counts}"
+    )
+
+
 def test_page_overview_loads_without_error():
     at = AppTest.from_function(_run_page_overview, default_timeout=60).run()
     assert not at.exception, f"page_overview raised: {list(at.exception)}"
