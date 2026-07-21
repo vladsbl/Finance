@@ -1,35 +1,32 @@
 #!/usr/bin/env python3
-"""Compute the fundamental score (valuation/momentum/volatility) for the full
-ticker universe, not just the 10 core-pipeline tickers.
+"""Compute the PRICE/VALUATION score (valuation/momentum/volatility) for the
+full ticker universe, not just the 10 core-pipeline tickers.
 
-Background -- IMPORTANT correction of an initial assumption
--------------------------------------------------------------
-Despite its name, the "fundamental" score in this codebase (analysis/
-fundamental/score.py) is NOT built from real fundamental data (revenue
-growth, margins, debt, cash-flow, P/E, etc.) -- no such field exists anywhere
-in this project. It is a *price-based* score: valuation (price vs MA50/MA200),
-short/long momentum (price vs MA50/MA200) and volatility, all sourced from the
-`stocks` table -- which, exactly like the technical score before it, is only
-ever populated by ingestion/fetch_prices.py for the 10 pilot tickers. That
-narrow source table is the sole reason it has been limited to 10 tickers; there
-is no hardcoded ticker list in the scoring logic itself.
+Background -- naming note
+--------------------------
+Despite the historical name "fundamental" still used for the underlying module
+path (analysis/fundamental/score.py, kept as-is since it's documented in
+README.md's pipeline table), this is NOT built from real fundamental data
+(revenue growth, margins, debt, cash-flow, P/E, etc.) -- see
+analysis/fundamental_real/ for that. It is a *price-based* score: valuation
+(price vs MA50/MA200), short/long momentum (price vs MA50/MA200) and
+volatility, all sourced from the `stocks` table -- which, exactly like the
+technical score before it, is only ever populated by ingestion/fetch_prices.py
+for the 10 pilot tickers. That narrow source table is the sole reason it has
+been limited to 10 tickers; there is no hardcoded ticker list in the scoring
+logic itself. The data it produces is named honestly: table
+`price_valuation_scores`, column `final_scores.price_valuation_score`.
 
 Consequence: extending it to the ~1900-ticker universe needs ZERO new API
 calls and no rate limits to respect -- price_history (already populated
 universe-wide by ingestion/ingest_universe_prices.py) has everything required
-(close prices for MA/valuation/momentum, and to derive volatility). This is
-reported explicitly because the task that prompted this script assumed an
-external-API dependency; that assumption does not hold for the score as it is
-actually implemented today. A genuine fundamentals score (growth, margins,
-debt) would be a separate, materially larger effort requiring new yfinance
-.info calls -- out of scope here, since the instruction is to reuse the
-existing scoring logic exactly, not invent a new one.
+(close prices for MA/valuation/momentum, and to derive volatility).
 
 This script reuses, verbatim, the exact scoring functions from
 analysis/fundamental/score.py (score_valuation, score_momentum_short,
 score_momentum_long, score_volatility) and analysis/combined_score.py's
-normalisation (_norm, FUND_MIN, FUND_MAX). Only the price/MA/volatility source
-changes (price_history instead of stocks).
+normalisation (_norm, PRICE_VAL_MIN, PRICE_VAL_MAX). Only the price/MA/
+volatility source changes (price_history instead of stocks).
 
 Volatility is computed with the exact same formula as
 ingestion/fetch_prices.py's compute_metrics(): annualised std-dev of the last
@@ -40,20 +37,20 @@ Precautions (same spirit as analysis/technical_scores_universe.py)
 * Never touches the 10 pilot tickers: they are detected via
   final_scores.final_score IS NOT NULL (a complete row only
   analysis/combined_score.py ever produces) and skipped entirely.
-* Resumable: a ticker already present in `fundamental_scores` (from the pilot
-  script OR a previous, possibly interrupted, run of this script) is skipped
-  too, so re-running after a crash does not recompute from scratch.
-* Writes to BOTH `fundamental_scores` (raw sub-scores, same schema/table as
-  the pilot script) and `final_scores` (normalised fundamental_score, which is
-  what reasoning/opportunity_scoring.py actually reads), carrying forward any
-  existing technical_score so this pass never shadows it.
+* Resumable: a ticker already present in `price_valuation_scores` (from the
+  pilot script OR a previous, possibly interrupted, run of this script) is
+  skipped too, so re-running after a crash does not recompute from scratch.
+* Writes to BOTH `price_valuation_scores` (raw sub-scores, same schema/table
+  as the pilot script) and `final_scores` (normalised price_valuation_score,
+  which is what reasoning/opportunity_scoring.py actually reads), carrying
+  forward any existing technical_score so this pass never shadows it.
 * Tickers with insufficient/unusable price history are skipped, logged, never
   crash the run.
 
 Usage:
-    python analysis/fundamental_scores_universe.py --priorite haute --limit 20
-    python analysis/fundamental_scores_universe.py --priorite haute
-    python analysis/fundamental_scores_universe.py --priorite toutes
+    python analysis/price_valuation_scores_universe.py --priorite haute --limit 20
+    python analysis/price_valuation_scores_universe.py --priorite haute
+    python analysis/price_valuation_scores_universe.py --priorite toutes
 """
 
 import argparse
@@ -69,10 +66,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from analysis.combined_score import FUND_MAX, FUND_MIN, _norm  # noqa: E402
+from analysis.combined_score import PRICE_VAL_MAX, PRICE_VAL_MIN, _norm  # noqa: E402
 from analysis.fundamental.score import (  # noqa: E402
-    CREATE_TABLE_SQL as FUND_CREATE_TABLE_SQL,
-    INSERT_SQL as FUND_INSERT_SQL,
+    CREATE_TABLE_SQL as PRICE_VAL_CREATE_TABLE_SQL,
+    INSERT_SQL as PRICE_VAL_INSERT_SQL,
     score_momentum_long, score_momentum_short, score_valuation, score_volatility,
 )
 
@@ -83,7 +80,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("fundamental_scores_universe")
+logger = logging.getLogger("price_valuation_scores_universe")
 
 # Same "enough history to be meaningful" bar as analysis/technical_scores_universe.py.
 MIN_HISTORY_DAYS = 15
@@ -92,10 +89,10 @@ VOLATILITY_WINDOW = 30
 
 FINAL_SCORES_INSERT_SQL = """
 INSERT INTO final_scores
-    (symbol, fundamental_score, technical_score, volatility_score,
+    (symbol, price_valuation_score, technical_score, volatility_score,
      volume_score, final_score, confidence)
 VALUES
-    (:symbol, :fundamental_score, :technical_score, NULL, NULL, NULL, :confidence);
+    (:symbol, :price_valuation_score, :technical_score, NULL, NULL, NULL, :confidence);
 """
 
 
@@ -137,7 +134,7 @@ def tickers_with_complete_score(conn, tickers):
 
 
 def tickers_already_processed(conn, tickers):
-    """Tickers that already have ANY row in fundamental_scores -- the 10
+    """Tickers that already have ANY row in price_valuation_scores -- the 10
     pilots (from analysis/fundamental/score.py) plus any ticker this script
     already scored in a previous (possibly interrupted) run. Skipping them
     is what makes the script resumable without a separate checkpoint file:
@@ -146,7 +143,7 @@ def tickers_already_processed(conn, tickers):
         return set()
     placeholders = ",".join("?" for _ in tickers)
     rows = conn.execute(
-        f"SELECT DISTINCT symbol FROM fundamental_scores WHERE symbol IN ({placeholders})",
+        f"SELECT DISTINCT symbol FROM price_valuation_scores WHERE symbol IN ({placeholders})",
         list(tickers),
     ).fetchall()
     return {r[0] for r in rows}
@@ -155,7 +152,7 @@ def tickers_already_processed(conn, tickers):
 def load_latest_technical(conn, tickers):
     """{symbol: technical_score} from each ticker's latest final_scores row
     with a non-null technical_score, if any -- carried forward so this
-    fundamental-only pass never shadows an existing technical score."""
+    price/valuation-only pass never shadows an existing technical score."""
     if not tickers:
         return {}
     placeholders = ",".join("?" for _ in tickers)
@@ -206,8 +203,8 @@ def compute_volatility(closes):
 
 
 def score_from_price_series(closes):
-    """Compute the fundamental sub-scores from a close-price series, or None
-    if there isn't enough usable history. Mirrors
+    """Compute the price/valuation sub-scores from a close-price series, or
+    None if there isn't enough usable history. Mirrors
     analysis/fundamental/score.py's score_stock() logic exactly, just fed
     from price_history-derived values instead of the `stocks` table."""
     n_points = len(closes)
@@ -245,7 +242,7 @@ def score_from_price_series(closes):
 
 def parse_args(argv):
     p = argparse.ArgumentParser(
-        description="Compute fundamental scores (valuation/momentum/volatility) "
+        description="Compute price/valuation scores (valuation/momentum/volatility) "
                     "for the ticker universe.")
     p.add_argument("--priorite", default="toutes",
                    choices=["haute", "moyenne", "basse", "toutes"])
@@ -263,7 +260,7 @@ def main(argv=None):
         return 1
 
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(FUND_CREATE_TABLE_SQL)
+    conn.execute(PRICE_VAL_CREATE_TABLE_SQL)
     conn.commit()
 
     tickers = load_tickers(conn, args.priorite, args.limit)
@@ -315,17 +312,17 @@ def main(argv=None):
                 "volatility_score": result["volatility_score"],
                 "total_score": result["total_score"],
             })
-            fundamental_score = round(_norm(result["total_score"], FUND_MIN, FUND_MAX), 2)
+            price_valuation_score = round(_norm(result["total_score"], PRICE_VAL_MIN, PRICE_VAL_MAX), 2)
             final_rows.append({
                 "symbol": ticker,
-                "fundamental_score": fundamental_score,
+                "price_valuation_score": price_valuation_score,
                 "technical_score": technical.get(ticker),
                 "confidence": result["confidence"],
             })
 
         if fund_rows:
             try:
-                conn.executemany(FUND_INSERT_SQL, fund_rows)
+                conn.executemany(PRICE_VAL_INSERT_SQL, fund_rows)
                 conn.executemany(FINAL_SCORES_INSERT_SQL, final_rows)
                 conn.commit()
             except sqlite3.Error as exc:

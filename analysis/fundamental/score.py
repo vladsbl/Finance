@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Compute a simplified fundamental score for each stock in data/marketdb.db.
+"""Compute a PRICE/VALUATION score for each stock in data/marketdb.db.
+
+IMPORTANT naming note: despite this module's path/history, it does NOT use
+real company fundamentals (revenue growth, margins, debt, cash-flow -- see
+analysis/fundamental_real/ for that). It scores price vs moving averages and
+volatility only. The module path is kept as-is (documented in README.md's
+pipeline table) to avoid an unrelated file-move; the DATA it produces has been
+renamed to be honest about what it is: the table is ``price_valuation_scores``
+and the column downstream (in ``final_scores``) is ``price_valuation_score``.
 
 Reads the latest snapshot of every symbol from the ``stocks`` table, scores it
-on four criteria, stores the result in ``fundamental_scores`` and prints a
+on four criteria, stores the result in ``price_valuation_scores`` and prints a
 report plus a top-5 ranking.
 
 Run directly:
@@ -27,11 +35,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("fundamental_score")
+logger = logging.getLogger("price_valuation_score")
 
 
 CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS fundamental_scores (
+CREATE TABLE IF NOT EXISTS price_valuation_scores (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol               TEXT,
     valuation_score      INTEGER,
@@ -44,7 +52,7 @@ CREATE TABLE IF NOT EXISTS fundamental_scores (
 """
 
 INSERT_SQL = """
-INSERT INTO fundamental_scores
+INSERT INTO price_valuation_scores
     (symbol, valuation_score, momentum_short_score,
      momentum_long_score, volatility_score, total_score)
 VALUES
@@ -153,7 +161,7 @@ def main():
         conn.execute(CREATE_TABLE_SQL)
         conn.commit()
     except sqlite3.Error as exc:
-        logger.error("Could not create/verify 'fundamental_scores' table: %s", exc)
+        logger.error("Could not create/verify 'price_valuation_scores' table: %s", exc)
         conn.close()
         return 1
 
@@ -198,7 +206,7 @@ def _print_report(scored):
         return
 
     print("\n" + "=" * 68)
-    print("FUNDAMENTAL SCORES")
+    print("PRICE/VALUATION SCORES")
     print("=" * 68)
     print(f"{'Symbol':<8}{'Valuation':>11}{'Mom.Short':>11}"
           f"{'Mom.Long':>11}{'Volatility':>12}{'Total':>8}")

@@ -24,12 +24,12 @@ technical_score, confidence), matching the append + "latest by MAX(id)" read
 convention already used by every consumer (analysis/combined_score.py's own
 inserts, reasoning/opportunity_scoring.py's reads). Because that convention
 means the newest row for a symbol always wins, this script CARRIES FORWARD
-that symbol's latest known fundamental_score (if any -- e.g. for the 10 pilot
-tickers already scored by combined_score.py) into the new row instead of
+that symbol's latest known price_valuation_score (if any -- e.g. for the 10
+pilot tickers already scored by combined_score.py) into the new row instead of
 writing NULL, so a universe-wide technical pass never shadows/loses an
-existing fundamental score. volatility_score, volume_score and final_score
+existing price/valuation score. volatility_score, volume_score and final_score
 are left NULL (not computed here) -- opportunity_scoring.py only ever reads
-fundamental_score/technical_score from this table, so that's safe; the legacy
+price_valuation_score/technical_score from this table, so that's safe; the legacy
 "Vue d'ensemble" dashboard page still only shows the 10 pilot tickers because
 it INNER JOINs against `stocks`, unaffected by the extra rows added here for
 tickers absent from `stocks`.
@@ -78,10 +78,10 @@ MIN_HISTORY_DAYS = RSI_PERIOD + 1
 
 INSERT_SQL = """
 INSERT INTO final_scores
-    (symbol, fundamental_score, technical_score, volatility_score,
+    (symbol, price_valuation_score, technical_score, volatility_score,
      volume_score, final_score, confidence)
 VALUES
-    (:symbol, :fundamental_score, :technical_score, NULL, NULL, NULL, :confidence);
+    (:symbol, :price_valuation_score, :technical_score, NULL, NULL, NULL, :confidence);
 """
 
 
@@ -126,19 +126,20 @@ def tickers_with_complete_score(conn, tickers):
     return {r[0] for r in rows}
 
 
-def load_latest_fundamentals(conn, tickers):
-    """Return {symbol: fundamental_score} using each ticker's latest
-    non-null fundamental_score already in final_scores, if any (e.g. the 10
-    pilot tickers scored by analysis/combined_score.py). Carried forward so
-    this technical-only pass never shadows an existing fundamental score."""
+def load_latest_price_valuations(conn, tickers):
+    """Return {symbol: price_valuation_score} using each ticker's latest
+    non-null price_valuation_score already in final_scores, if any (e.g. the
+    10 pilot tickers scored by analysis/combined_score.py). Carried forward
+    so this technical-only pass never shadows an existing price/valuation
+    score."""
     if not tickers:
         return {}
     placeholders = ",".join("?" for _ in tickers)
     rows = conn.execute(
-        f"SELECT symbol, fundamental_score FROM final_scores f "
-        f"WHERE symbol IN ({placeholders}) AND fundamental_score IS NOT NULL "
+        f"SELECT symbol, price_valuation_score FROM final_scores f "
+        f"WHERE symbol IN ({placeholders}) AND price_valuation_score IS NOT NULL "
         f"AND id = (SELECT MAX(id) FROM final_scores "
-        f"          WHERE symbol = f.symbol AND fundamental_score IS NOT NULL)",
+        f"          WHERE symbol = f.symbol AND price_valuation_score IS NOT NULL)",
         list(tickers),
     ).fetchall()
     return dict(rows)
@@ -229,7 +230,7 @@ def main(argv=None):
     for i, batch in enumerate(batches, start=1):
         already_complete = tickers_with_complete_score(conn, batch)
         series_by_ticker = load_price_series(conn, batch)
-        fundamentals = load_latest_fundamentals(conn, batch)
+        price_valuations = load_latest_price_valuations(conn, batch)
         rows_to_insert = []
         for ticker in batch:
             if ticker in already_complete:
@@ -247,7 +248,7 @@ def main(argv=None):
                 "symbol": ticker,
                 "technical_score": technical_score,
                 "confidence": confidence,
-                "fundamental_score": fundamentals.get(ticker),
+                "price_valuation_score": price_valuations.get(ticker),
             })
 
         if rows_to_insert:

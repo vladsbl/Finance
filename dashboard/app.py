@@ -53,7 +53,7 @@ JOIN (SELECT symbol, MAX(id) AS max_id FROM stocks GROUP BY symbol) l
 """
 
 LATEST_FINAL_SQL = """
-SELECT f.symbol, f.fundamental_score, f.technical_score, f.volatility_score,
+SELECT f.symbol, f.price_valuation_score, f.technical_score, f.volatility_score,
        f.volume_score, f.final_score, f.confidence
 FROM final_scores f
 JOIN (SELECT symbol, MAX(id) AS max_id FROM final_scores GROUP BY symbol) l
@@ -154,12 +154,12 @@ def render_top10(df):
     st.subheader("Top 10 Actions")
 
     table = df.head(10)[[
-        "symbol", "final_score", "fundamental_score", "technical_score",
+        "symbol", "final_score", "price_valuation_score", "technical_score",
         "volatility_score", "volume_score", "confidence",
     ]].rename(columns={
         "symbol": "Symbol",
         "final_score": "Final Score",
-        "fundamental_score": "Fundamental",
+        "price_valuation_score": "Prix/Valo",
         "technical_score": "Technical",
         "volatility_score": "Volatility",
         "volume_score": "Volume",
@@ -174,7 +174,7 @@ def render_top10(df):
         table.style
         .apply(color_row, axis=1)
         .format({
-            "Final Score": "{:.1f}", "Fundamental": "{:.1f}",
+            "Final Score": "{:.1f}", "Prix/Valo": "{:.1f}",
             "Technical": "{:.1f}", "Volatility": "{:.1f}",
             "Volume": "{:.1f}", "Confidence": "{:.0f}%",
         })
@@ -205,7 +205,7 @@ def render_detail(df):
 
     st.markdown("**Scores**")
     s1, s2, s3 = st.columns(3)
-    s1.metric("Fundamental", f"{row['fundamental_score']:.1f}")
+    s1.metric("Prix/Valorisation", f"{row['price_valuation_score']:.1f}")
     s2.metric("Technical", f"{row['technical_score']:.1f}")
     s3.metric("Volatility score", f"{row['volatility_score']:.1f}")
     s4, s5, s6 = st.columns(3)
@@ -433,7 +433,7 @@ def render_graph_page():
 # --- Opportunites du jour ---------------------------------------------------
 
 OPPORTUNITES_SQL = """
-SELECT o.ticker, o.score_global, o.score_fondamental, o.score_technique,
+SELECT o.ticker, o.score_global, o.score_prix_valorisation, o.score_technique,
        o.score_news, o.explication, o.confiance, o.date_calcul, u.priorite
 FROM opportunites o
 JOIN universe u ON u.ticker = o.ticker
@@ -502,11 +502,11 @@ def render_opportunities_page():
         return
 
     table = sub[[
-        "ticker", "priorite", "score_global", "score_fondamental",
+        "ticker", "priorite", "score_global", "score_prix_valorisation",
         "score_technique", "score_news", "confiance",
     ]].rename(columns={
         "ticker": "Ticker", "priorite": "Priorite",
-        "score_global": "Score global", "score_fondamental": "Fondamental",
+        "score_global": "Score global", "score_prix_valorisation": "Prix/Valo",
         "score_technique": "Technique", "score_news": "News",
         "confiance": "Confiance",
     })
@@ -519,7 +519,7 @@ def render_opportunities_page():
         table.style
         .apply(color_row, axis=1)
         .format({
-            "Score global": "{:.1f}", "Fondamental": "{:.1f}",
+            "Score global": "{:.1f}", "Prix/Valo": "{:.1f}",
             "Technique": "{:.1f}", "News": "{:.1f}", "Confiance": "{:.0f}%",
         }, na_rep="n/a")
     )
@@ -599,7 +599,7 @@ def render_daily_summary_page():
             c3.metric("Confiance", f"{s['confiance']:.0f}%")
 
             risk_bg = RISK_COLOR.get(s["risque"], COLOR_MID)
-            conflict_note = " - fondamental/technique en contradiction" if s["conflit_composantes"] else ""
+            conflict_note = " - prix/valorisation vs technique en contradiction" if s["conflit_composantes"] else ""
             st.markdown(
                 f"<span style='background-color:{risk_bg};color:white;"
                 f"padding:2px 10px;border-radius:12px;font-size:0.85em'>"
@@ -630,7 +630,7 @@ def _get_scored_data():
 
 
 def page_daily_summary():
-    """Today's strongest advisory signals (fundamental+technical+news, no LLM)."""
+    """Today's strongest advisory signals (price/valuation+technical+news, no LLM)."""
     render_daily_summary_page()
 
 
@@ -661,7 +661,7 @@ def page_graph():
 
 
 def page_opportunities():
-    """Aggregated opportunity scores (fundamental + technical + news, no LLM)."""
+    """Aggregated opportunity scores (price/valuation + technical + news, no LLM)."""
     render_opportunities_page()
 
 

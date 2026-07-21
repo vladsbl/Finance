@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Combine fundamental, technical, volatility and volume signals into a final
-weighted score per stock.
+"""Combine price/valuation, technical, volatility and volume signals into a
+final weighted score per stock.
+
+Naming note: "fundamental" here means the PRICE/VALUATION score from
+analysis/fundamental/score.py (momentum vs moving averages + volatility) --
+not real company fundamentals (growth, margins, debt). See
+analysis/fundamental_real/ for that.
 
 Reads the latest snapshot of every symbol from ``stocks`` and the latest
-fundamental score from ``fundamental_scores`` (both in data/marketdb.db),
-computes simple technical indicators (RSI + MA50 trend), then blends
-everything into a 0-100 ``final_score`` with a ``confidence`` level, stored in
-``final_scores``.
+price/valuation score from ``price_valuation_scores`` (both in
+data/marketdb.db), computes simple technical indicators (RSI + MA50 trend),
+then blends everything into a 0-100 ``final_score`` with a ``confidence``
+level, stored in ``final_scores``.
 
 Data note
 ---------
@@ -36,15 +41,15 @@ DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
 RSI_PERIOD = 14
 
 # Weights of each component in the final score (must sum to 1.0).
-W_FUNDAMENTAL = 0.40
+W_PRICE_VALUATION = 0.40
 W_TECHNICAL = 0.30
 W_VOLATILITY = 0.20
 W_VOLUME = 0.10
 
-# Normalisation ranges. Fundamental total_score theoretically spans
+# Normalisation ranges. Price/valuation total_score theoretically spans
 # [-75, +70] (see analysis/fundamental/score.py). Technical raw spans
 # [-25, +25] (RSI points in {-15,0,15} + trend points in {-10,0,10}).
-FUND_MIN, FUND_MAX = -75.0, 70.0
+PRICE_VAL_MIN, PRICE_VAL_MAX = -75.0, 70.0
 TECH_MIN, TECH_MAX = -25.0, 25.0
 # Annualised volatility: <= VOL_LOW is ideal (100), >= VOL_HIGH is worst (0).
 VOL_LOW, VOL_HIGH = 0.10, 0.60
@@ -59,24 +64,24 @@ logger = logging.getLogger("combined_score")
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS final_scores (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol            TEXT,
-    fundamental_score REAL,
-    technical_score   REAL,
-    volatility_score  REAL,
-    volume_score      REAL,
-    final_score       REAL,
-    confidence        REAL,
-    timestamp         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol                TEXT,
+    price_valuation_score REAL,
+    technical_score       REAL,
+    volatility_score      REAL,
+    volume_score          REAL,
+    final_score           REAL,
+    confidence            REAL,
+    timestamp             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
 
 INSERT_SQL = """
 INSERT INTO final_scores
-    (symbol, fundamental_score, technical_score, volatility_score,
+    (symbol, price_valuation_score, technical_score, volatility_score,
      volume_score, final_score, confidence)
 VALUES
-    (:symbol, :fundamental_score, :technical_score, :volatility_score,
+    (:symbol, :price_valuation_score, :technical_score, :volatility_score,
      :volume_score, :final_score, :confidence);
 """
 
@@ -99,11 +104,11 @@ WHERE close IS NOT NULL
 ORDER BY ticker, date;
 """
 
-# Latest fundamental total_score per symbol.
-LATEST_FUNDAMENTAL_SQL = """
+# Latest price/valuation total_score per symbol.
+LATEST_PRICE_VALUATION_SQL = """
 SELECT f.symbol, f.total_score
-FROM fundamental_scores f
-JOIN (SELECT symbol, MAX(id) AS max_id FROM fundamental_scores GROUP BY symbol) l
+FROM price_valuation_scores f
+JOIN (SELECT symbol, MAX(id) AS max_id FROM price_valuation_scores GROUP BY symbol) l
   ON f.id = l.max_id;
 """
 
@@ -219,8 +224,8 @@ def load_price_history(conn):
     return history
 
 
-def load_fundamentals(conn):
-    return {symbol: total for symbol, total in conn.execute(LATEST_FUNDAMENTAL_SQL)}
+def load_price_valuations(conn):
+    return {symbol: total for symbol, total in conn.execute(LATEST_PRICE_VALUATION_SQL)}
 
 
 # --- Orchestration ---------------------------------------------------------
@@ -249,7 +254,7 @@ def main():
     try:
         latest = conn.execute(LATEST_STOCKS_SQL).fetchall()
         history = load_price_history(conn)
-        fundamentals = load_fundamentals(conn)
+        price_valuations = load_price_valuations(conn)
     except sqlite3.Error as exc:
         logger.error("Could not read source tables: %s", exc)
         conn.close()
@@ -264,7 +269,7 @@ def main():
     prelim = []
     volumes = []
     for row in latest:
-        item = _analyse_row(row, history, fundamentals)
+        item = _analyse_row(row, history, price_valuations)
         if item is None:
             continue
         prelim.append(item)
@@ -298,7 +303,7 @@ def main():
     return 0 if results else 1
 
 
-def _analyse_row(row, history, fundamentals):
+def _analyse_row(row, history, price_valuations):
     """Compute raw (un-normalised) component values for one symbol."""
     symbol = row["symbol"]
     price = row["current_price"]
@@ -322,15 +327,15 @@ def _analyse_row(row, history, fundamentals):
     direction = price_direction(series)
     technical_raw = rsi_points(rsi) + trend_points(price, ma_50, direction)
 
-    fundamental_raw = fundamentals.get(symbol)  # may be None
+    price_valuation_raw = price_valuations.get(symbol)  # may be None
 
-    # Confidence: data completeness (50%), fundamental availability (30%),
+    # Confidence: data completeness (50%), price/valuation availability (30%),
     # RSI reliability from history length (20%).
     fields = [price, ma_50, ma_200, volume, volatility]
     fields_ok = sum(1 for f in fields if f is not None) / len(fields)
-    has_fund = 1.0 if fundamental_raw is not None else 0.0
+    has_price_val = 1.0 if price_valuation_raw is not None else 0.0
     rsi_reliability = min(1.0, max(0, n_points - 1) / RSI_PERIOD)
-    confidence = 100.0 * (0.5 * fields_ok + 0.3 * has_fund + 0.2 * rsi_reliability)
+    confidence = 100.0 * (0.5 * fields_ok + 0.3 * has_price_val + 0.2 * rsi_reliability)
 
     return {
         "symbol": symbol,
@@ -341,18 +346,18 @@ def _analyse_row(row, history, fundamentals):
         "rsi": rsi,
         "rsi_is_real": rsi_is_real,
         "technical_raw": technical_raw,
-        "fundamental_raw": fundamental_raw,
+        "price_valuation_raw": price_valuation_raw,
         "confidence": round(confidence, 1),
     }
 
 
 def _finalise(item, vmin, vmax):
     """Normalise components to 0-100 and compute the weighted final score."""
-    # Fundamental: neutral 50 when unavailable.
-    if item["fundamental_raw"] is None:
-        fundamental_score = 50.0
+    # Price/valuation: neutral 50 when unavailable.
+    if item["price_valuation_raw"] is None:
+        price_valuation_score = 50.0
     else:
-        fundamental_score = _norm(item["fundamental_raw"], FUND_MIN, FUND_MAX)
+        price_valuation_score = _norm(item["price_valuation_raw"], PRICE_VAL_MIN, PRICE_VAL_MAX)
 
     technical_score = _norm(item["technical_raw"], TECH_MIN, TECH_MAX)
 
@@ -368,7 +373,7 @@ def _finalise(item, vmin, vmax):
         volume_score = _norm(item["volume"], vmin, vmax)
 
     final_score = (
-        W_FUNDAMENTAL * fundamental_score
+        W_PRICE_VALUATION * price_valuation_score
         + W_TECHNICAL * technical_score
         + W_VOLATILITY * volatility_score
         + W_VOLUME * volume_score
@@ -376,7 +381,7 @@ def _finalise(item, vmin, vmax):
 
     return {
         "symbol": item["symbol"],
-        "fundamental_score": round(fundamental_score, 2),
+        "price_valuation_score": round(price_valuation_score, 2),
         "technical_score": round(technical_score, 2),
         "volatility_score": round(volatility_score, 2),
         "volume_score": round(volume_score, 2),
@@ -397,14 +402,14 @@ def _print_ranking(results):
     print("\n" + "=" * 92)
     print("FINAL COMBINED SCORES - TOP 10")
     print("=" * 92)
-    header = (f"{'#':>2}  {'Symbol':<7}{'Fund':>8}{'Tech':>8}{'Vol.ty':>8}"
+    header = (f"{'#':>2}  {'Symbol':<7}{'PxVal':>8}{'Tech':>8}{'Vol.ty':>8}"
               f"{'Volume':>8}{'RSI':>7}{'FINAL':>9}{'Conf%':>8}")
     print(header)
     print("-" * 92)
     for rank, r in enumerate(ranked, start=1):
         rsi_flag = "" if r["rsi_is_real"] else "~"  # ~ marks a proxy RSI
         print(f"{rank:>2}  {r['symbol']:<7}"
-              f"{r['fundamental_score']:>8.1f}{r['technical_score']:>8.1f}"
+              f"{r['price_valuation_score']:>8.1f}{r['technical_score']:>8.1f}"
               f"{r['volatility_score']:>8.1f}{r['volume_score']:>8.1f}"
               f"{rsi_flag + str(r['rsi']):>7}{r['final_score']:>9.2f}"
               f"{r['confidence']:>8.1f}")

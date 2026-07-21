@@ -18,8 +18,8 @@ well-supported one:
 
 Rationale: `confiance` (see reasoning/opportunity_scoring.py) already measures
 exactly "how much of this score can we trust" -- it is 100 when all three
-components (fundamental, technical, fresh news) are present, and lower when
-some are missing or stale. Multiplying makes confiance a direct, transparent
+components (price/valuation, technical, fresh news) are present, and lower
+when some are missing or stale. Multiplying makes confiance a direct, transparent
 discount on the raw score: a ticker at 80 with 33% confiance scores 26.6,
 well below a ticker at 73 with 83% confiance (60.8) -- exactly the ordering a
 person reading a daily "top picks" list would expect and trust. It is a single
@@ -34,10 +34,10 @@ Risk level is derived (not scored by an LLM) from three signals:
   * annualised volatility (same bands as analysis/fundamental/score.py's
     score_volatility: >40% high, <20% low)
   * confiance itself (a signal that isn't fully backed carries more risk)
-  * coherence between the fundamental and technical components -- if one is
-    clearly strong and the other clearly weak, that contradiction raises risk
-    (a stock the fundamentals like but the technicals are selling off, or vice
-    versa, is a genuinely less clear-cut situation)
+  * coherence between the price/valuation and technical components -- if one
+    is clearly strong and the other clearly weak, that contradiction raises
+    risk (a stock priced attractively but whose technicals are selling off,
+    or vice versa, is a genuinely less clear-cut situation)
 
 "Companies to watch" queries the Knowledge Graph (graph/build_graph.py,
 networkx) for each retained ticker's direct relations (competitor/supplier/
@@ -68,7 +68,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from analysis.fundamental_scores_universe import compute_volatility  # noqa: E402
+from analysis.price_valuation_scores_universe import compute_volatility  # noqa: E402
 from graph.build_graph import build_graph, direct_relations, load_relations  # noqa: E402
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
@@ -118,10 +118,11 @@ def _classify(score):
     return "neutre"
 
 
-def has_conflict(score_fondamental, score_technique):
-    """True when fundamental and technical clearly disagree (one solid, the
-    other weak) -- a genuinely less clear-cut situation, not just a small gap."""
-    f, t = _classify(score_fondamental), _classify(score_technique)
+def has_conflict(score_prix_valorisation, score_technique):
+    """True when price/valuation and technical clearly disagree (one solid,
+    the other weak) -- a genuinely less clear-cut situation, not just a small
+    gap."""
+    f, t = _classify(score_prix_valorisation), _classify(score_technique)
     if f is None or t is None:
         return False
     return {f, t} == {"haute", "basse"}
@@ -201,7 +202,7 @@ def build_daily_summary(conn, today=None):
     for r in top:
         closes = load_price_series(conn, r["ticker"])
         volatility = compute_volatility(closes) if closes else None
-        conflict = has_conflict(r["score_fondamental"], r["score_technique"])
+        conflict = has_conflict(r["score_prix_valorisation"], r["score_technique"])
         risk = compute_risk(volatility, r["confiance"], conflict)
         watch = companies_to_watch(graph, relations, r["ticker"])
 
@@ -210,7 +211,7 @@ def build_daily_summary(conn, today=None):
             "score_global": r["score_global"],
             "confiance": r["confiance"],
             "score_ajuste": compute_adjusted_score(r["score_global"], r["confiance"]),
-            "score_fondamental": r["score_fondamental"],
+            "score_prix_valorisation": r["score_prix_valorisation"],
             "score_technique": r["score_technique"],
             "score_news": r["score_news"],
             "explication": r["explication"],
@@ -253,7 +254,7 @@ def print_summary(signals, today, n_candidates):
         print(f"#{rank} {s['ticker']} - score ajuste {s['score_ajuste']:.1f} "
               f"(brut {s['score_global']:.1f} x confiance {s['confiance']:.0f}%)")
         print(f"    Risque: {s['risque']}" +
-              (" (fondamental/technique en contradiction)" if s["conflit_composantes"] else "") +
+              (" (prix/valorisation vs technique en contradiction)" if s["conflit_composantes"] else "") +
               (f" - volatilite annualisee {_fmt_pct(s['volatilite'])}" if s["volatilite"] else ""))
         print(f"    Horizon: {s['horizon']}")
         print(f"    Arguments: {s['explication']}")

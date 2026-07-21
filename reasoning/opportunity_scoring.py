@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Module 9 v1 - Opportunity detection: pure SQLite aggregation, no LLM calls.
 
-Combines scores ALREADY present in the database (fundamental, technical,
+Combines scores ALREADY present in the database (price/valuation, technical,
 news) into a single 0-100 "score_global" per ticker, with a transparent,
 human-readable explanation and a confidence level based on data availability
 and freshness. Spirit of reasoning/prioritize_news.py: fast, free, local.
 
+Naming note: "price/valuation" here is what used to be loosely called
+"fundamental" -- it is a momentum/volatility score, not real company
+fundamentals (growth, margins, debt); see analysis/fundamental_real/ for that.
+
 Sources (real column names, verified against the live schema before writing
 this script -- see the schema inspection in the session, not assumed):
-  * final_scores.fundamental_score  -- already normalised 0-100 by
-    analysis/combined_score.py (fundamental_scores.total_score, [-75,+70],
+  * final_scores.price_valuation_score -- already normalised 0-100 by
+    analysis/combined_score.py (price_valuation_scores.total_score, [-75,+70],
     is the RAW version; we reuse the already-normalised column to avoid
     duplicating that normalisation logic).
   * final_scores.technical_score    -- already normalised 0-100 (RSI +
@@ -55,7 +59,7 @@ logger = logging.getLogger("opportunity_scoring")
 
 # --- Weights: easy to adjust, must sum to 1.0 -------------------------------
 
-POIDS = {"fondamental": 0.4, "technique": 0.3, "news": 0.3}
+POIDS = {"prix_valorisation": 0.4, "technique": 0.3, "news": 0.3}
 assert abs(sum(POIDS.values()) - 1.0) < 1e-9, "POIDS must sum to 1.0"
 
 # News scoring / freshness windows.
@@ -71,32 +75,32 @@ THRESH_FAIBLE = 40.0
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS opportunites (
-    ticker            TEXT NOT NULL,
-    date_calcul       TEXT NOT NULL,
-    score_global      REAL,
-    score_fondamental REAL,
-    score_technique   REAL,
-    score_news        REAL,
-    explication       TEXT,
-    confiance         REAL,
+    ticker                  TEXT NOT NULL,
+    date_calcul             TEXT NOT NULL,
+    score_global            REAL,
+    score_prix_valorisation REAL,
+    score_technique         REAL,
+    score_news              REAL,
+    explication             TEXT,
+    confiance               REAL,
     PRIMARY KEY (ticker, date_calcul)
 );
 """
 
 UPSERT_SQL = """
 INSERT INTO opportunites
-    (ticker, date_calcul, score_global, score_fondamental, score_technique,
+    (ticker, date_calcul, score_global, score_prix_valorisation, score_technique,
      score_news, explication, confiance)
 VALUES
-    (:ticker, :date_calcul, :score_global, :score_fondamental, :score_technique,
+    (:ticker, :date_calcul, :score_global, :score_prix_valorisation, :score_technique,
      :score_news, :explication, :confiance)
 ON CONFLICT(ticker, date_calcul) DO UPDATE SET
-    score_global      = excluded.score_global,
-    score_fondamental = excluded.score_fondamental,
-    score_technique   = excluded.score_technique,
-    score_news        = excluded.score_news,
-    explication       = excluded.explication,
-    confiance         = excluded.confiance;
+    score_global            = excluded.score_global,
+    score_prix_valorisation = excluded.score_prix_valorisation,
+    score_technique         = excluded.score_technique,
+    score_news              = excluded.score_news,
+    explication             = excluded.explication,
+    confiance               = excluded.confiance;
 """
 
 
@@ -117,11 +121,11 @@ def load_tickers(conn, priorite, limit):
     return rows
 
 
-def get_fundamental_technical(conn, ticker):
-    """Latest (fundamental_score, technical_score) from final_scores, or
+def get_price_valuation_technical(conn, ticker):
+    """Latest (price_valuation_score, technical_score) from final_scores, or
     (None, None) if this ticker has no row there yet."""
     row = conn.execute(
-        "SELECT fundamental_score, technical_score FROM final_scores "
+        "SELECT price_valuation_score, technical_score FROM final_scores "
         "WHERE symbol = ? ORDER BY id DESC LIMIT 1",
         (ticker,),
     ).fetchone()
@@ -210,7 +214,7 @@ def compute_score_global(f_score, t_score, n_score):
     component has data."""
     available = {}
     if f_score is not None:
-        available["fondamental"] = f_score
+        available["prix_valorisation"] = f_score
     if t_score is not None:
         available["technique"] = t_score
     if n_score is not None:
@@ -248,7 +252,7 @@ def _component_line(label, score, pos_word, neg_word, neutral_word):
 def build_explanation(f_score, t_score, n_score, has_fresh_news):
     """Human-readable, transparent breakdown of the three components."""
     lines = [
-        _component_line("Fondamental", f_score, "solide", "faible", "neutre"),
+        _component_line("Prix/Valorisation", f_score, "solide", "faible", "neutre"),
         _component_line("Momentum technique", t_score, "positif", "faible", "neutre"),
     ]
     if n_score is None:
@@ -265,7 +269,7 @@ def build_explanation(f_score, t_score, n_score, has_fresh_news):
 def score_ticker(conn, ticker, now=None):
     """Compute the full opportunity record for one ticker. Never raises."""
     try:
-        f_score, t_score = get_fundamental_technical(conn, ticker)
+        f_score, t_score = get_price_valuation_technical(conn, ticker)
     except sqlite3.Error:
         f_score, t_score = None, None
     try:
@@ -280,7 +284,7 @@ def score_ticker(conn, ticker, now=None):
     return {
         "ticker": ticker,
         "score_global": score_global,
-        "score_fondamental": f_score,
+        "score_prix_valorisation": f_score,
         "score_technique": t_score,
         "score_news": n_score,
         "explication": explication,

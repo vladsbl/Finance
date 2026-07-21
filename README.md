@@ -61,8 +61,8 @@ Run the steps in order (each reads/writes `data/marketdb.db`):
 |------|---------|--------------|
 | 1. Price history (2 years of daily bars) | `python ingestion/ingest_prices.py` | `price_history` |
 | 2. Current snapshot (price, MAs, volume, volatility) | `python ingestion/fetch_prices.py` | `stocks` |
-| 3. Fundamental score | `python analysis/fundamental/score.py` | `fundamental_scores` |
-| 4. Combined score (fundamental + technical + volatility + volume) | `python analysis/combined_score.py` | `final_scores` |
+| 3. Price/valuation score (momentum vs MAs + volatility -- NOT real company fundamentals) | `python analysis/fundamental/score.py` | `price_valuation_scores` |
+| 4. Combined score (price/valuation + technical + volatility + volume) | `python analysis/combined_score.py` | `final_scores` |
 | 5. Fetch news (Yahoo RSS + Finnhub) | `python ingestion/fetch_news.py` | `news_raw` |
 | 6. Analyse news with LLM (Groq) | `python reasoning/analyze_news.py` | `news_analysis` |
 | 7. Import relations (knowledge graph seed) | `python graph/import_relations.py` | `relations` |
