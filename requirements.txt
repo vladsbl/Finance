@@ -2,7 +2,7 @@ yfinance
 pandas
 numpy
 streamlit
-plotly
+plotly==6.8.0
 groq
 python-dotenv
 requests
@@ -10,3 +10,5 @@ networkx
 pyvis
 lxml
 pytest
+certifi==2026.6.17
+httpx==0.28.1
