@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Module 9 v1 - Opportunity detection: pure SQLite aggregation, no LLM calls.
+"""Module 9 v2 - Opportunity detection: pure SQLite aggregation, no LLM calls.
 
-Combines scores ALREADY present in the database (price/valuation, technical,
-news) into a single 0-100 "score_global" per ticker, with a transparent,
-human-readable explanation and a confidence level based on data availability
-and freshness. Spirit of reasoning/prioritize_news.py: fast, free, local.
+Combines FOUR scores ALREADY present in the database (price/valuation,
+technical, news, real fundamentals) into a single 0-100 "score_global" per
+ticker, with a transparent, human-readable explanation and a confidence level
+based on data availability and freshness. Spirit of
+reasoning/prioritize_news.py: fast, free, local.
 
 Naming note: "price/valuation" here is what used to be loosely called
 "fundamental" -- it is a momentum/volatility score, not real company
-fundamentals (growth, margins, debt); see analysis/fundamental_real/ for that.
+fundamentals. "Fondamental reel" (this version's 4th component) IS built from
+real company financials (revenue growth, margin, debt, FCF evolution) -- see
+analysis/fundamental_real/score.py.
 
 Sources (real column names, verified against the live schema before writing
 this script -- see the schema inspection in the session, not assumed):
@@ -20,14 +23,17 @@ this script -- see the schema inspection in the session, not assumed):
     price-vs-MA50/MA200 trend, see analysis/combined_score.py).
   * news_analysis.importance (1-10) + news_analysis.tonalite
     (positive/negative/neutre), joined via news_raw.id/ticker/published_at.
+  * fundamental_real_scores.score_global -- already normalised 0-100 by
+    analysis/fundamental_real/score.py (weighted blend of revenue growth,
+    net margin, debt/equity and FCF YoY evolution).
 
-Both final_scores and news_analysis currently only cover the original 10
-core-pipeline tickers (AAPL, MSFT, ...), NOT the full ~1900-ticker universe:
-the wider ingestion (price_history, universe) has been run, but
-analysis/combined_score.py and reasoning/analyze_news.py have not (yet) been
-run at that scale. Missing components are handled explicitly -- never
-crashes, always yields a (possibly partial) result with a matching
-confidence.
+final_scores and news_analysis currently only cover the original 10
+core-pipeline tickers (AAPL, MSFT, ...); price_valuation/technical scores and
+fundamental_real_scores DO cover the full ~1900-ticker universe (see
+analysis/price_valuation_scores_universe.py, analysis/technical_scores_universe.py,
+analysis/fundamental_real/score.py). Missing components are handled
+explicitly -- never crashes, always yields a (possibly partial) result with a
+matching confidence.
 
 Usage:
     python reasoning/opportunity_scoring.py --priorite haute
@@ -58,8 +64,20 @@ logging.basicConfig(
 logger = logging.getLogger("opportunity_scoring")
 
 # --- Weights: easy to adjust, must sum to 1.0 -------------------------------
-
-POIDS = {"prix_valorisation": 0.4, "technique": 0.3, "news": 0.3}
+# Equal weighting (25% each) for the 4 components: this project favours
+# simple, transparent heuristics over engineered biases absent strong
+# evidence for a different split, and the 4 signals are conceptually the most
+# independent sources of information available today (price/valuation and
+# technical are both price-derived and so somewhat correlated, but each still
+# captures a different facet -- valuation-vs-moving-average positioning vs.
+# RSI/trend momentum -- while news and real fundamentals are genuinely
+# separate data sources). Easy to retune later if evidence suggests otherwise.
+POIDS = {
+    "prix_valorisation": 0.25,
+    "technique": 0.25,
+    "news": 0.25,
+    "fondamental_reel": 0.25,
+}
 assert abs(sum(POIDS.values()) - 1.0) < 1e-9, "POIDS must sum to 1.0"
 
 # News scoring / freshness windows.
@@ -81,6 +99,7 @@ CREATE TABLE IF NOT EXISTS opportunites (
     score_prix_valorisation REAL,
     score_technique         REAL,
     score_news              REAL,
+    score_fondamental_reel  REAL,
     explication             TEXT,
     confiance               REAL,
     PRIMARY KEY (ticker, date_calcul)
@@ -90,18 +109,30 @@ CREATE TABLE IF NOT EXISTS opportunites (
 UPSERT_SQL = """
 INSERT INTO opportunites
     (ticker, date_calcul, score_global, score_prix_valorisation, score_technique,
-     score_news, explication, confiance)
+     score_news, score_fondamental_reel, explication, confiance)
 VALUES
     (:ticker, :date_calcul, :score_global, :score_prix_valorisation, :score_technique,
-     :score_news, :explication, :confiance)
+     :score_news, :score_fondamental_reel, :explication, :confiance)
 ON CONFLICT(ticker, date_calcul) DO UPDATE SET
     score_global            = excluded.score_global,
     score_prix_valorisation = excluded.score_prix_valorisation,
     score_technique         = excluded.score_technique,
     score_news              = excluded.score_news,
+    score_fondamental_reel  = excluded.score_fondamental_reel,
     explication             = excluded.explication,
     confiance               = excluded.confiance;
 """
+
+
+def ensure_schema(conn):
+    """Create the table (fresh installs) or add the new column to an
+    existing table (migration, no data loss -- existing rows just get NULL
+    for the new column until the next opportunity_scoring.py run)."""
+    conn.execute(CREATE_TABLE_SQL)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(opportunites)")}
+    if "score_fondamental_reel" not in cols:
+        conn.execute("ALTER TABLE opportunites ADD COLUMN score_fondamental_reel REAL")
+    conn.commit()
 
 
 # --- Data access ---------------------------------------------------------------
@@ -132,6 +163,18 @@ def get_price_valuation_technical(conn, ticker):
     if not row:
         return None, None
     return row[0], row[1]
+
+
+def get_real_fundamental_score(conn, ticker):
+    """Latest score_global from fundamental_real_scores, or None if this
+    ticker has no row there yet (or its score_global is itself None -- e.g.
+    a ticker fetched successfully but with zero usable financial fields)."""
+    row = conn.execute(
+        "SELECT score_global FROM fundamental_real_scores "
+        "WHERE symbol = ? ORDER BY id DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    return row[0] if row else None
 
 
 def get_news_rows(conn, ticker):
@@ -208,7 +251,7 @@ def news_signal(conn, ticker, now=None):
     return round(score, 1), has_fresh
 
 
-def compute_score_global(f_score, t_score, n_score):
+def compute_score_global(f_score, t_score, n_score, rf_score):
     """Weighted average over whatever components are available, weights
     renormalised over the available subset. None (nothing available) if no
     component has data."""
@@ -219,6 +262,8 @@ def compute_score_global(f_score, t_score, n_score):
         available["technique"] = t_score
     if n_score is not None:
         available["news"] = n_score
+    if rf_score is not None:
+        available["fondamental_reel"] = rf_score
     if not available:
         return None
     total_weight = sum(POIDS[k] for k in available)
@@ -226,9 +271,10 @@ def compute_score_global(f_score, t_score, n_score):
     return round(weighted / total_weight, 1)
 
 
-def compute_confidence(f_score, t_score, n_score, has_fresh_news):
-    """0-100. Each of the 3 components present contributes up to 1 point;
-    the news point is halved if data exists but is stale (>7 days)."""
+def compute_confidence(f_score, t_score, n_score, has_fresh_news, rf_score):
+    """0-100. Each of the 4 truly independent components present contributes
+    up to 1 point (out of 4); the news point is halved if data exists but is
+    stale (>7 days)."""
     points = 0.0
     if f_score is not None:
         points += 1.0
@@ -236,7 +282,9 @@ def compute_confidence(f_score, t_score, n_score, has_fresh_news):
         points += 1.0
     if n_score is not None:
         points += 1.0 if has_fresh_news else 0.5
-    return round((points / 3.0) * 100.0, 1)
+    if rf_score is not None:
+        points += 1.0
+    return round((points / 4.0) * 100.0, 1)
 
 
 def _component_line(label, score, pos_word, neg_word, neutral_word):
@@ -249,8 +297,8 @@ def _component_line(label, score, pos_word, neg_word, neutral_word):
     return f"• {label} {neutral_word} ({score:.0f}/100)"
 
 
-def build_explanation(f_score, t_score, n_score, has_fresh_news):
-    """Human-readable, transparent breakdown of the three components."""
+def build_explanation(f_score, t_score, n_score, has_fresh_news, rf_score):
+    """Human-readable, transparent breakdown of the four components."""
     lines = [
         _component_line("Prix/Valorisation", f_score, "solide", "faible", "neutre"),
         _component_line("Momentum technique", t_score, "positif", "faible", "neutre"),
@@ -263,6 +311,9 @@ def build_explanation(f_score, t_score, n_score, has_fresh_news):
             _component_line("News recentes", n_score, "positives", "negatives", "neutres")
             + stale_note
         )
+    lines.append(
+        _component_line("Fondamental reel", rf_score, "solide", "faible", "neutre")
+    )
     return " | ".join(lines)
 
 
@@ -276,10 +327,14 @@ def score_ticker(conn, ticker, now=None):
         n_score, has_fresh_news = news_signal(conn, ticker, now)
     except sqlite3.Error:
         n_score, has_fresh_news = None, False
+    try:
+        rf_score = get_real_fundamental_score(conn, ticker)
+    except sqlite3.Error:
+        rf_score = None
 
-    score_global = compute_score_global(f_score, t_score, n_score)
-    confiance = compute_confidence(f_score, t_score, n_score, has_fresh_news)
-    explication = build_explanation(f_score, t_score, n_score, has_fresh_news)
+    score_global = compute_score_global(f_score, t_score, n_score, rf_score)
+    confiance = compute_confidence(f_score, t_score, n_score, has_fresh_news, rf_score)
+    explication = build_explanation(f_score, t_score, n_score, has_fresh_news, rf_score)
 
     return {
         "ticker": ticker,
@@ -287,6 +342,7 @@ def score_ticker(conn, ticker, now=None):
         "score_prix_valorisation": f_score,
         "score_technique": t_score,
         "score_news": n_score,
+        "score_fondamental_reel": rf_score,
         "explication": explication,
         "confiance": confiance,
     }
@@ -310,8 +366,7 @@ def main(argv=None):
         return 1
 
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(CREATE_TABLE_SQL)
-    conn.commit()
+    ensure_schema(conn)
 
     tickers = load_tickers(conn, args.priorite, args.limit)
     if not tickers:

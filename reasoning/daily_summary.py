@@ -17,9 +17,9 @@ well-supported one:
     score_ajuste = score_global * (confiance / 100)
 
 Rationale: `confiance` (see reasoning/opportunity_scoring.py) already measures
-exactly "how much of this score can we trust" -- it is 100 when all three
-components (price/valuation, technical, fresh news) are present, and lower
-when some are missing or stale. Multiplying makes confiance a direct, transparent
+exactly "how much of this score can we trust" -- it is 100 when all four
+components (price/valuation, technical, fresh news, real fundamentals) are
+present, and lower when some are missing or stale. Multiplying makes confiance a direct, transparent
 discount on the raw score: a ticker at 80 with 33% confiance scores 26.6,
 well below a ticker at 73 with 83% confiance (60.8) -- exactly the ordering a
 person reading a daily "top picks" list would expect and trust. It is a single
@@ -34,15 +34,28 @@ Risk level is derived (not scored by an LLM) from three signals:
   * annualised volatility (same bands as analysis/fundamental/score.py's
     score_volatility: >40% high, <20% low)
   * confiance itself (a signal that isn't fully backed carries more risk)
-  * coherence between the price/valuation and technical components -- if one
-    is clearly strong and the other clearly weak, that contradiction raises
-    risk (a stock priced attractively but whose technicals are selling off,
-    or vice versa, is a genuinely less clear-cut situation)
+  * coherence between the three "structural" components -- price/valuation,
+    technical, and real fundamentals (news is deliberately excluded from this
+    check: it is a same-day opinion signal, not a structural read on the
+    business) -- if any one is clearly strong while another is clearly weak,
+    that contradiction raises risk (e.g. attractive fundamentals but selling
+    technicals, or vice versa, is a genuinely less clear-cut situation)
 
 "Companies to watch" queries the Knowledge Graph (graph/build_graph.py,
 networkx) for each retained ticker's direct relations (competitor/supplier/
 client/partner); a ticker absent from the graph simply gets no such section,
 never an error.
+
+Argued text (LLM)
+------------------
+On top of the structured data above, each retained signal gets a short
+written paragraph from Groq (same model/retry/backoff pattern as
+reasoning/analyze_news.py) explaining WHY it matters today, grounded strictly
+in the data already computed (never invents facts). Capped at
+DAILY_LLM_CALL_LIMIT calls/day (its own counter, `llm_usage_summary`, kept
+separate from analyze_news.py's `llm_usage` so the two quotas never interfere).
+Any failure (missing API key, network error, rate limit exhaustion) is
+swallowed: the signal simply keeps its structured presentation, never a crash.
 
 Usage:
     python reasoning/daily_summary.py
@@ -53,6 +66,7 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from datetime import date
 
 # The report uses check/cross marks (✓/✗/•) inherited from opportunity_scoring's
@@ -72,6 +86,13 @@ from analysis.price_valuation_scores_universe import compute_volatility  # noqa:
 from graph.build_graph import build_graph, direct_relations, load_relations  # noqa: E402
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
+DATA_DIR = os.path.dirname(DB_PATH)
+
+# CA bundle before importing anything httpx-based (groq uses httpx). See
+# ingestion/ssl_utils.py -- same pattern as analyze_news.py / fetch_company_names.py.
+from ingestion.ssl_utils import configure_ca_bundle  # noqa: E402
+
+CA_BUNDLE = configure_ca_bundle(DATA_DIR)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -118,14 +139,13 @@ def _classify(score):
     return "neutre"
 
 
-def has_conflict(score_prix_valorisation, score_technique):
-    """True when price/valuation and technical clearly disagree (one solid,
-    the other weak) -- a genuinely less clear-cut situation, not just a small
-    gap."""
-    f, t = _classify(score_prix_valorisation), _classify(score_technique)
-    if f is None or t is None:
-        return False
-    return {f, t} == {"haute", "basse"}
+def has_conflict(*scores):
+    """True when any two of the given "structural" scores clearly disagree
+    (one solid, another weak) -- a genuinely less clear-cut situation, not
+    just a small gap. Pass price/valuation, technique and fondamental_reel;
+    news is deliberately excluded (see module docstring)."""
+    classified = {_classify(s) for s in scores if s is not None}
+    return "haute" in classified and "basse" in classified
 
 
 def compute_risk(volatility, confiance, conflict):
@@ -169,6 +189,22 @@ def load_price_series(conn, ticker):
     return [r[0] for r in rows]
 
 
+def load_display_name(conn, ticker):
+    """nom_entreprise (yfinance longName/shortName) in priority, falling back
+    to `nom` (scraped from the index constituent page at universe-build time)
+    if nom_entreprise is null/empty, falling back to the ticker itself if
+    neither is usable. nom_entreprise practically never ends up empty (it
+    already falls back to the ticker at fetch time -- see
+    universe/fetch_company_names.py) so NULLIF(..., ticker) treats "fell back
+    to the bare ticker" the same as "no name", letting `nom` take over."""
+    row = conn.execute(
+        "SELECT COALESCE(NULLIF(nom_entreprise, ticker), NULLIF(nom, ''), ticker) "
+        "FROM universe WHERE ticker = ?",
+        (ticker,),
+    ).fetchone()
+    return row[0] if row else ticker
+
+
 def companies_to_watch(graph, relations, ticker):
     """Direct relations grouped by type, or None if the ticker isn't in the
     Knowledge Graph at all (never an error in that case)."""
@@ -176,6 +212,234 @@ def companies_to_watch(graph, relations, ticker):
         return None
     grouped = direct_relations(relations, ticker)
     return grouped or None
+
+
+# --- Argued text (Groq LLM) --------------------------------------------------
+
+GROQ_MODEL = "llama-3.3-70b-versatile"
+MAX_RETRIES = 5      # for 429 rate-limit backoff, same as analyze_news.py
+BACKOFF_BASE = 2.0   # seconds: 2, 4, 8, 16, 32
+
+# At most TOP_N signals/day, so this is naturally capped -- kept as an
+# explicit constant (rather than reusing TOP_N directly) so the quota is
+# self-documenting and easy to retune independently of the ranking size.
+DAILY_LLM_CALL_LIMIT = 3
+
+CREATE_SUMMARY_USAGE_SQL = """
+CREATE TABLE IF NOT EXISTS llm_usage_summary (
+    day   TEXT PRIMARY KEY,
+    calls INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+# Persisted so the same day's argued text is reused by every consumer (CLI
+# run, dashboard page load, dashboard refresh) instead of being regenerated
+# -- without this, whichever process happens to run first would burn the
+# whole day's quota and every other consumer would silently see the
+# structured-only fallback for the rest of the day, even though the text had
+# already been produced once.
+CREATE_ARGUMENTS_SQL = """
+CREATE TABLE IF NOT EXISTS daily_summary_arguments (
+    day        TEXT NOT NULL,
+    ticker     TEXT NOT NULL,
+    texte      TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (day, ticker)
+);
+"""
+
+SYSTEM_PROMPT_ARGUMENT = (
+    "Tu es un analyste financier qui redige un court paragraphe en francais "
+    "pour expliquer POURQUOI un signal d'investissement merite l'attention "
+    "AUJOURD'HUI. Regle absolue : reste strictement fidele aux donnees "
+    "fournies -- n'invente aucun fait, aucun chiffre, aucune information qui "
+    "n'y figure pas explicitement. Appuie-toi uniquement sur les scores, les "
+    "explications, le niveau de risque et les entreprises liees fournis. "
+    "Style : clair, concis, professionnel, 3 a 5 phrases. N'enumere pas "
+    "mecaniquement les chiffres deja donnes : explique ce qu'ils signifient "
+    "pour un investisseur. Reponds uniquement avec le paragraphe, sans titre "
+    "ni introduction ni markdown."
+)
+
+
+def _is_rate_limit(exc):
+    status = getattr(exc, "status_code", None)
+    return status == 429 or "429" in str(exc) or "rate limit" in str(exc).lower()
+
+
+def get_summary_usage(conn, day):
+    row = conn.execute(
+        "SELECT calls FROM llm_usage_summary WHERE day = ?", (day,)
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def bump_summary_usage(conn, day):
+    conn.execute(
+        "INSERT INTO llm_usage_summary (day, calls) VALUES (?, 1) "
+        "ON CONFLICT(day) DO UPDATE SET calls = calls + 1",
+        (day,),
+    )
+    conn.commit()
+
+
+def load_cached_argument(conn, day, ticker):
+    row = conn.execute(
+        "SELECT texte FROM daily_summary_arguments WHERE day = ? AND ticker = ?",
+        (day, ticker),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def save_argument(conn, day, ticker, texte):
+    conn.execute(
+        "INSERT INTO daily_summary_arguments (day, ticker, texte) VALUES (?, ?, ?) "
+        "ON CONFLICT(day, ticker) DO UPDATE SET texte = excluded.texte",
+        (day, ticker, texte),
+    )
+    conn.commit()
+
+
+def build_argument_prompt(signal):
+    lines = [
+        f"Entreprise : {signal['nom_affiche']} ({signal['ticker']})",
+        f"Score global : {signal['score_global']:.1f}/100 "
+        f"(confiance {signal['confiance']:.0f}%, score ajuste {signal['score_ajuste']:.1f})",
+        f"Detail des composantes : {signal['explication']}",
+        f"Niveau de risque retenu : {signal['risque']}",
+    ]
+    if signal.get("conflit_composantes"):
+        lines.append(
+            "Attention : contradiction detectee entre composantes structurelles "
+            "(prix/valorisation, technique, fondamental reel)."
+        )
+    if signal.get("volatilite") is not None:
+        lines.append(f"Volatilite annualisee : {signal['volatilite']:.0%}")
+    watch = signal.get("entreprises_a_surveiller")
+    if watch:
+        parts = [f"{rtype}: {', '.join(names)}" for rtype, names in watch.items()]
+        lines.append("Entreprises liees (graphe de connaissances) : " + " | ".join(parts))
+    lines.append(
+        "Redige le paragraphe explicatif demande, uniquement a partir des "
+        "elements ci-dessus."
+    )
+    return "\n".join(lines)
+
+
+def generate_argued_text(client, signal):
+    completion = client.chat.completions.create(
+        model=GROQ_MODEL,
+        temperature=0.4,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT_ARGUMENT},
+            {"role": "user", "content": build_argument_prompt(signal)},
+        ],
+    )
+    text = completion.choices[0].message.content
+    return text.strip() if text else None
+
+
+def generate_with_retry(client, signal):
+    """generate_argued_text with exponential backoff on 429 rate limits."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            return generate_argued_text(client, signal)
+        except Exception as exc:  # noqa: BLE001
+            if _is_rate_limit(exc) and attempt < MAX_RETRIES - 1:
+                wait = BACKOFF_BASE * (2 ** attempt)
+                logger.warning("Rate limit (429). Backoff %.0fs (try %d/%d)...",
+                               wait, attempt + 1, MAX_RETRIES)
+                time.sleep(wait)
+                continue
+            raise
+    return None
+
+
+def add_argued_texts(conn, signals):
+    """Best-effort enrichment: sets signal["texte_argumente"] for each signal,
+    reusing a cached text from `daily_summary_arguments` when today's text for
+    that ticker was already generated (by an earlier CLI run or dashboard
+    load), and generating fresh ones via Groq for the rest, up to
+    DAILY_LLM_CALL_LIMIT NEW calls/day. Never raises -- any failure (missing
+    key, no network, quota exhausted, API error) just leaves the affected
+    signal(s) at texte_argumente=None, and callers (CLI print, dashboard)
+    fall back to the pre-existing structured-only presentation."""
+    for s in signals:
+        s.setdefault("texte_argumente", None)
+
+    if not signals:
+        return
+
+    # Dashboard page tests (tests/test_dashboard_pages.py) exercise this exact
+    # code path against the real production database via AppTest -- without
+    # this guard, every test run would burn real Groq quota and require
+    # network access. PYTEST_CURRENT_TEST is set automatically by pytest for
+    # the duration of each test.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+
+    today_real = date.today().isoformat()
+
+    try:
+        conn.execute(CREATE_SUMMARY_USAGE_SQL)
+        conn.execute(CREATE_ARGUMENTS_SQL)
+        conn.commit()
+    except sqlite3.Error as exc:
+        logger.warning("Tables llm_usage_summary/daily_summary_arguments "
+                        "indisponibles (%s). Repli sur presentation structuree.", exc)
+        return
+
+    pending = []
+    for s in signals:
+        cached = load_cached_argument(conn, today_real, s["ticker"])
+        if cached:
+            s["texte_argumente"] = cached
+        else:
+            pending.append(s)
+
+    if not pending:
+        return
+
+    used = get_summary_usage(conn, today_real)
+    remaining = max(0, DAILY_LLM_CALL_LIMIT - used)
+    if remaining <= 0:
+        logger.info("Quota LLM resume (%d/jour) deja atteint (%d utilises). "
+                     "Repli sur presentation structuree pour les tickers restants.",
+                     DAILY_LLM_CALL_LIMIT, used)
+        return
+
+    from dotenv import load_dotenv
+    load_dotenv()
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        logger.warning("GROQ_API_KEY absent. Repli sur presentation structuree.")
+        return
+
+    try:
+        import httpx
+        from groq import Groq
+        http_client = httpx.Client(verify=CA_BUNDLE) if CA_BUNDLE else None
+        client = Groq(api_key=api_key, http_client=http_client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Client Groq indisponible (%s). "
+                        "Repli sur presentation structuree.", exc)
+        return
+
+    for s in pending[:remaining]:
+        try:
+            text = generate_with_retry(client, s)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "%s: generation du texte argumente echouee (%s). "
+                "Repli sur presentation structuree pour ce ticker.",
+                s["ticker"], exc,
+            )
+            continue
+        if not text:
+            continue
+        s["texte_argumente"] = text
+        save_argument(conn, today_real, s["ticker"], text)
+        bump_summary_usage(conn, today_real)
 
 
 # --- Orchestration ---------------------------------------------------------
@@ -202,18 +466,23 @@ def build_daily_summary(conn, today=None):
     for r in top:
         closes = load_price_series(conn, r["ticker"])
         volatility = compute_volatility(closes) if closes else None
-        conflict = has_conflict(r["score_prix_valorisation"], r["score_technique"])
+        conflict = has_conflict(
+            r["score_prix_valorisation"], r["score_technique"], r["score_fondamental_reel"]
+        )
         risk = compute_risk(volatility, r["confiance"], conflict)
         watch = companies_to_watch(graph, relations, r["ticker"])
+        nom_affiche = load_display_name(conn, r["ticker"])
 
         signals.append({
             "ticker": r["ticker"],
+            "nom_affiche": nom_affiche,
             "score_global": r["score_global"],
             "confiance": r["confiance"],
             "score_ajuste": compute_adjusted_score(r["score_global"], r["confiance"]),
             "score_prix_valorisation": r["score_prix_valorisation"],
             "score_technique": r["score_technique"],
             "score_news": r["score_news"],
+            "score_fondamental_reel": r["score_fondamental_reel"],
             "explication": r["explication"],
             "risque": risk,
             "conflit_composantes": conflict,
@@ -251,10 +520,13 @@ def print_summary(signals, today, n_candidates):
           f"(confiance >= {MIN_CONFIDENCE:.0f}%).\n")
 
     for rank, s in enumerate(signals, start=1):
-        print(f"#{rank} {s['ticker']} - score ajuste {s['score_ajuste']:.1f} "
+        print(f"#{rank} {s['ticker']} ({s['nom_affiche']}) - score ajuste {s['score_ajuste']:.1f} "
               f"(brut {s['score_global']:.1f} x confiance {s['confiance']:.0f}%)")
+        if s.get("texte_argumente"):
+            print(f"    {s['texte_argumente']}")
+            print()
         print(f"    Risque: {s['risque']}" +
-              (" (prix/valorisation vs technique en contradiction)" if s["conflit_composantes"] else "") +
+              (" (composantes structurelles en contradiction)" if s["conflit_composantes"] else "") +
               (f" - volatilite annualisee {_fmt_pct(s['volatilite'])}" if s["volatilite"] else ""))
         print(f"    Horizon: {s['horizon']}")
         print(f"    Arguments: {s['explication']}")
@@ -275,6 +547,7 @@ def main(argv=None):
 
     conn = sqlite3.connect(DB_PATH)
     signals, today, n_candidates = build_daily_summary(conn, today=args.date)
+    add_argued_texts(conn, signals)
     conn.close()
 
     print_summary(signals, today, n_candidates)

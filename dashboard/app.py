@@ -32,7 +32,9 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from analysis.combined_score import compute_rsi, proxy_rsi  # noqa: E402
-from reasoning.daily_summary import MIN_CONFIDENCE, build_daily_summary  # noqa: E402
+from reasoning.daily_summary import (  # noqa: E402
+    MIN_CONFIDENCE, add_argued_texts, build_daily_summary,
+)
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
 
@@ -377,8 +379,33 @@ def load_relations():
     return rows
 
 
-def _graph_html(graph):
-    """Render the networkx graph to a self-contained interactive HTML (pyvis)."""
+@st.cache_data(show_spinner=False)
+def load_universe_names():
+    """{ticker: display_name} for every tracked ticker, same priority as
+    elsewhere: nom_entreprise (yfinance), falling back to nom, falling back
+    to the ticker itself. Used to label Knowledge Graph "primary" nodes with
+    a real company name instead of the bare ticker."""
+    if not os.path.exists(DB_PATH):
+        return {}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT ticker, COALESCE(NULLIF(nom_entreprise, ticker), "
+            "NULLIF(nom, ''), ticker) FROM universe"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return {}
+    return dict(rows)
+
+
+def _graph_html(graph, names):
+    """Render the networkx graph to a self-contained interactive HTML (pyvis).
+
+    Primary (tracked) nodes are labelled "TICKER - Company Name" using
+    `names` (falls back to the bare ticker if not found) instead of just the
+    ticker, so the graph is as readable as the external nodes (which already
+    carry a real company name from the relations data)."""
     from pyvis.network import Network
     net = Network(height="560px", width="100%", directed=True,
                   cdn_resources="in_line", bgcolor="#ffffff",
@@ -386,8 +413,14 @@ def _graph_html(graph):
     net.repulsion(node_distance=160, spring_length=140)
     for node, d in graph.nodes(data=True):
         primary = d["kind"] == "primary"
-        title = f"{d['label']} ({d['ticker']})" if d["ticker"] else d["label"]
-        net.add_node(node, label=d["label"], title=title,
+        if primary:
+            display_name = names.get(node, node)
+            label = f"{node} - {display_name}" if display_name != node else node
+            title = f"{display_name} ({node})"
+        else:
+            label = d["label"]
+            title = f"{d['label']} ({d['ticker']})" if d["ticker"] else d["label"]
+        net.add_node(node, label=label, title=title,
                      color=COLOR_GOOD if primary else "#9aa0a6",
                      size=26 if primary else 16)
     for u, v, d in graph.edges(data=True):
@@ -413,7 +446,7 @@ def render_graph_page():
 
     try:
         import streamlit.components.v1 as components
-        components.html(_graph_html(graph), height=580, scrolling=False)
+        components.html(_graph_html(graph, load_universe_names()), height=580, scrolling=False)
     except Exception as exc:  # noqa: BLE001 - pyvis missing / render issue
         st.warning(f"Graphe interactif indisponible ({exc}). "
                    "Relations en texte ci-dessous.")
@@ -421,7 +454,12 @@ def render_graph_page():
     st.divider()
     st.markdown("**Relations directes par ticker**")
     tickers = sorted({r["source_ticker"].strip() for r in relations})
-    ticker = st.selectbox("Ticker", tickers, key="graph_ticker")
+    names_by_ticker = load_universe_names()
+    ticker = st.selectbox(
+        "Ticker", tickers, key="graph_ticker",
+        format_func=lambda t: f"{t} - {names_by_ticker.get(t, t)}"
+                              if names_by_ticker.get(t, t) != t else t,
+    )
     grouped = direct_relations(relations, ticker)
     if not grouped:
         st.write(f"{ticker} : aucune relation directe connue.")
@@ -432,9 +470,16 @@ def render_graph_page():
 
 # --- Opportunites du jour ---------------------------------------------------
 
+# nom_affiche: nom_entreprise (yfinance) in priority, falling back to nom
+# (scraped at universe-build time) when nom_entreprise is null/empty OR fell
+# back to the bare ticker itself (see universe/fetch_company_names.py),
+# falling back to the ticker as the last resort. Never null.
 OPPORTUNITES_SQL = """
-SELECT o.ticker, o.score_global, o.score_prix_valorisation, o.score_technique,
-       o.score_news, o.explication, o.confiance, o.date_calcul, u.priorite
+SELECT o.ticker,
+       COALESCE(NULLIF(u.nom_entreprise, o.ticker), NULLIF(u.nom, ''), o.ticker) AS nom_affiche,
+       o.score_global, o.score_prix_valorisation, o.score_technique,
+       o.score_news, o.score_fondamental_reel, o.explication, o.confiance,
+       o.date_calcul, u.priorite
 FROM opportunites o
 JOIN universe u ON u.ticker = o.ticker
 WHERE o.date_calcul = (SELECT MAX(date_calcul) FROM opportunites)
@@ -502,13 +547,13 @@ def render_opportunities_page():
         return
 
     table = sub[[
-        "ticker", "priorite", "score_global", "score_prix_valorisation",
-        "score_technique", "score_news", "confiance",
+        "ticker", "nom_affiche", "priorite", "score_global", "score_prix_valorisation",
+        "score_technique", "score_news", "score_fondamental_reel", "confiance",
     ]].rename(columns={
-        "ticker": "Ticker", "priorite": "Priorite",
+        "ticker": "Ticker", "nom_affiche": "Nom", "priorite": "Priorite",
         "score_global": "Score global", "score_prix_valorisation": "Prix/Valo",
         "score_technique": "Technique", "score_news": "News",
-        "confiance": "Confiance",
+        "score_fondamental_reel": "Fondamental reel", "confiance": "Confiance",
     })
 
     def color_row(row):
@@ -520,7 +565,8 @@ def render_opportunities_page():
         .apply(color_row, axis=1)
         .format({
             "Score global": "{:.1f}", "Prix/Valo": "{:.1f}",
-            "Technique": "{:.1f}", "News": "{:.1f}", "Confiance": "{:.0f}%",
+            "Technique": "{:.1f}", "News": "{:.1f}",
+            "Fondamental reel": "{:.1f}", "Confiance": "{:.0f}%",
         }, na_rep="n/a")
     )
     st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -536,6 +582,7 @@ def render_opportunities_page():
     ticker = st.selectbox("Ticker", tickers, key="opp_ticker")
     row = sub[sub["ticker"] == ticker].iloc[0]
 
+    st.markdown(f"#### {row['ticker']} -- {row['nom_affiche']}")
     c1, c2, c3 = st.columns(3)
     score = row["score_global"]
     c1.metric("Score global", f"{score:.1f}" if pd.notna(score) else "n/a")
@@ -557,6 +604,7 @@ def load_daily_summary():
     try:
         conn = sqlite3.connect(DB_PATH)
         signals, today, n_candidates = build_daily_summary(conn)
+        add_argued_texts(conn, signals)
         conn.close()
     except sqlite3.Error as exc:
         return [], None, 0, str(exc)
@@ -593,13 +641,16 @@ def render_daily_summary_page():
     for rank, s in enumerate(signals, start=1):
         with st.container(border=True):
             c1, c2, c3 = st.columns([2, 1, 1])
-            c1.markdown(f"### #{rank}  {s['ticker']}")
+            c1.markdown(f"### #{rank}  {s['ticker']} -- {s['nom_affiche']}")
             c2.metric("Score ajuste", f"{s['score_ajuste']:.1f}",
                       help="score_global x (confiance / 100)")
             c3.metric("Confiance", f"{s['confiance']:.0f}%")
 
+            if s.get("texte_argumente"):
+                st.markdown(f"##### {s['texte_argumente']}")
+
             risk_bg = RISK_COLOR.get(s["risque"], COLOR_MID)
-            conflict_note = " - prix/valorisation vs technique en contradiction" if s["conflit_composantes"] else ""
+            conflict_note = " - composantes structurelles en contradiction" if s["conflit_composantes"] else ""
             st.markdown(
                 f"<span style='background-color:{risk_bg};color:white;"
                 f"padding:2px 10px;border-radius:12px;font-size:0.85em'>"
@@ -608,14 +659,24 @@ def render_daily_summary_page():
                 unsafe_allow_html=True,
             )
             st.caption(s["horizon"])
-            st.write(s["explication"])
-            if s["volatilite"] is not None:
-                st.caption(f"Volatilite annualisee : {s['volatilite']:.0%}")
 
-            if s["entreprises_a_surveiller"]:
-                st.markdown("**Entreprises a surveiller**")
-                for rtype, names in s["entreprises_a_surveiller"].items():
-                    st.markdown(f"- **{rtype}** : {', '.join(names)}")
+            if s.get("texte_argumente"):
+                with st.expander("Detail des composantes (donnees structurees)"):
+                    st.write(s["explication"])
+                    if s["volatilite"] is not None:
+                        st.caption(f"Volatilite annualisee : {s['volatilite']:.0%}")
+                    if s["entreprises_a_surveiller"]:
+                        st.markdown("**Entreprises a surveiller**")
+                        for rtype, names in s["entreprises_a_surveiller"].items():
+                            st.markdown(f"- **{rtype}** : {', '.join(names)}")
+            else:
+                st.write(s["explication"])
+                if s["volatilite"] is not None:
+                    st.caption(f"Volatilite annualisee : {s['volatilite']:.0%}")
+                if s["entreprises_a_surveiller"]:
+                    st.markdown("**Entreprises a surveiller**")
+                    for rtype, names in s["entreprises_a_surveiller"].items():
+                        st.markdown(f"- **{rtype}** : {', '.join(names)}")
 
 
 # --- Pages ------------------------------------------------------------------
@@ -695,6 +756,7 @@ def main():
             load_opportunites.clear()
             load_universe_priorities.clear()
             load_daily_summary.clear()
+            load_universe_names.clear()
             st.rerun()
 
     nav.run()
