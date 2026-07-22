@@ -201,6 +201,15 @@ def _is_rate_limit(exc):
     return status == 429 or "429" in str(exc) or "rate limit" in str(exc).lower()
 
 
+def _is_forbidden(exc):
+    """Finnhub's free tier returns HTTP 403 for non-US tickers (see
+    diagnostics/international_coverage_report.md) -- expected and routine at
+    priorite=haute scale (haute includes many international tickers, not just
+    US large caps), never a real failure."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == 403
+
+
 def fetch_finnhub_with_retry(ticker, session, api_key):
     """fetch_finnhub with exponential backoff on 429 rate limits.
 
@@ -275,24 +284,37 @@ def _chunks(seq, size):
 
 
 def fetch_one(ticker, priorite, session, finnhub_key):
-    """Fetch + merge news for a single ticker. Returns (merged_items, stats)."""
+    """Fetch + merge news for a single ticker. Returns (merged_items, n_yahoo,
+    n_finnhub, finnhub_status), finnhub_status one of "ok" (called, may be 0
+    results), "forbidden" (expected 403, non-US ticker), "error" (a genuine
+    failure), or "skipped" (no key / priorite not in FINNHUB_PRIORITIES)."""
     yahoo_items, finnhub_items = [], []
+    finnhub_status = "skipped"
 
     try:
         yahoo_items = fetch_yahoo_rss(ticker, session)
     except Exception as exc:  # noqa: BLE001
         logger.error("%s: Yahoo RSS failed (%s)", ticker, exc)
 
-    # Finnhub free tier is US-only; skip it for international tickers rather
-    # than waste a call that will 403 (see diagnostics report).
+    # priorite=haute is not US-only (it includes many international tickers,
+    # e.g. Tokyo/London/Seoul large caps) -- Finnhub's free tier 403s on all
+    # of those. That is an EXPECTED, routine outcome at this scale, not a
+    # failure: logged at debug level and tracked as its own status rather
+    # than as an error.
     if finnhub_key and priorite in FINNHUB_PRIORITIES:
         try:
             finnhub_items = fetch_finnhub_with_retry(ticker, session, finnhub_key)
+            finnhub_status = "ok"
         except Exception as exc:  # noqa: BLE001
-            logger.error("%s: Finnhub failed (%s)", ticker, exc)
+            if _is_forbidden(exc):
+                logger.debug("%s: Finnhub 403 (non-US ticker, expected).", ticker)
+                finnhub_status = "forbidden"
+            else:
+                logger.error("%s: Finnhub failed (%s)", ticker, exc)
+                finnhub_status = "error"
 
     merged = merge_dedup(yahoo_items, finnhub_items)
-    return merged, len(yahoo_items), len(finnhub_items)
+    return merged, len(yahoo_items), len(finnhub_items), finnhub_status
 
 
 def parse_args(argv):
@@ -343,14 +365,17 @@ def main(argv=None):
 
     start = time.time()
     total_inserted = total_yahoo = total_finnhub = 0
+    finnhub_status_counts = {"ok": 0, "forbidden": 0, "error": 0, "skipped": 0}
 
     for b_i, batch in enumerate(batches, start=1):
         b_start = time.time()
         batch_inserted = 0
         for ticker, priorite in batch:
-            merged, n_yahoo, n_finnhub = fetch_one(ticker, priorite, session, finnhub_key)
+            merged, n_yahoo, n_finnhub, finnhub_status = fetch_one(
+                ticker, priorite, session, finnhub_key)
             total_yahoo += n_yahoo
             total_finnhub += n_finnhub
+            finnhub_status_counts[finnhub_status] += 1
 
             if merged:
                 try:
@@ -379,6 +404,12 @@ def main(argv=None):
     logger.info("Done in %.1fs. %d tickers | yahoo=%d finnhub=%d fetched | "
                 "%d new rows inserted.", elapsed, len(tickers), total_yahoo,
                 total_finnhub, total_inserted)
+    logger.info(
+        "Finnhub: %d ok | %d 403 non-US (attendu, pas un echec) | "
+        "%d echecs reels | %d ignores (hors haute / pas de cle).",
+        finnhub_status_counts["ok"], finnhub_status_counts["forbidden"],
+        finnhub_status_counts["error"], finnhub_status_counts["skipped"],
+    )
     return 0
 
 

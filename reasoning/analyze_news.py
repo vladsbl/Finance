@@ -6,6 +6,14 @@ a strict pre-filter runs first (to protect the limited Groq free quota), then
 the survivors are sent to Groq which returns a strict JSON verdict. Results are
 cached in ``news_analysis`` so a news item is never analysed twice.
 
+Candidates are drawn from ALL tickers with collected news (no ticker
+restriction in this module -- see reasoning/prioritize_news.py for the
+ranking), ordered by descending priority score, and capped two ways:
+  * DAILY_CALL_LIMIT total Groq calls/day (existing counter, ``llm_usage``).
+  * MAX_NEWS_PER_TICKER_PER_DAY (5) analyses per ticker/day, so a single
+    heavily-covered ticker cannot absorb the whole day's budget at the
+    expense of the other haute-priority tickers.
+
 Usage:
     python reasoning/analyze_news.py --dry-run            # estimate quota only
     python reasoning/analyze_news.py                      # analyse everything
@@ -49,6 +57,15 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # Groq's free tier is limited (~1000 requests/day). Stay under it.
 DAILY_CALL_LIMIT = 1000
+
+# Coverage now spans up to 503 haute-priority tickers (see
+# ingestion/fetch_news.py), each potentially with dozens of news items --
+# without a per-ticker cap, a single heavily-covered ticker could absorb a
+# large share of the day's Groq budget at the expense of the other tickers.
+# This does NOT add a separate quota counter: it reads today's per-ticker
+# counts straight from the existing news_analysis table, alongside the
+# existing global DAILY_CALL_LIMIT (llm_usage).
+MAX_NEWS_PER_TICKER_PER_DAY = 5
 
 MIN_TITLE_LEN = 20
 MAX_RETRIES = 5          # for 429 rate-limit backoff
@@ -184,6 +201,19 @@ def bump_usage(conn, day):
     conn.commit()
 
 
+def get_today_ticker_counts(conn, day):
+    """{ticker: count} of news already analysed today, derived from the
+    existing news_analysis table (no separate counter to keep in sync)."""
+    rows = conn.execute(
+        "SELECT r.ticker, COUNT(*) FROM news_analysis a "
+        "JOIN news_raw r ON r.id = a.news_id "
+        "WHERE date(a.created_at) = ? "
+        "GROUP BY r.ticker",
+        (day,),
+    ).fetchall()
+    return dict(rows)
+
+
 # --- LLM call --------------------------------------------------------------
 
 SYSTEM_PROMPT = (
@@ -205,6 +235,21 @@ SYSTEM_PROMPT = (
 def _is_rate_limit(exc):
     status = getattr(exc, "status_code", None)
     return status == 429 or "429" in str(exc) or "rate limit" in str(exc).lower()
+
+
+def _is_daily_token_limit(exc):
+    """Groq's free ``on_demand`` tier enforces a Tokens-Per-Day (TPD) cap
+    (100k at time of writing) that, for this prompt's typical size, binds
+    much sooner than DAILY_CALL_LIMIT's request-count assumption -- observed
+    in practice around 270-290 analyses/day, not 1000. Distinguished from a
+    transient per-minute rate limit because Groq's own error message quotes a
+    multi-minute wait: retrying it with the usual few-second backoff cannot
+    possibly succeed, so this signal must stop the whole run immediately
+    instead of burning through the rest of the candidate list one exhausted
+    retry loop at a time (which, at thousands of remaining items, would take
+    hours for no benefit)."""
+    text = str(exc).lower()
+    return "tokens per day" in text or "(tpd)" in text
 
 
 def _coerce_int(value, lo, hi, default):
@@ -243,11 +288,16 @@ def analyse_one(client, ticker, title, summary):
 
 
 def analyse_with_retry(client, ticker, title, summary):
-    """analyse_one with exponential backoff on 429 rate limits."""
+    """analyse_one with exponential backoff on transient (per-minute) 429
+    rate limits. A daily-token-limit 429 (TPD, see _is_daily_token_limit) is
+    NOT retried here -- it propagates immediately so the caller can stop the
+    whole run instead of wasting a backoff that cannot possibly succeed."""
     for attempt in range(MAX_RETRIES):
         try:
             return analyse_one(client, ticker, title, summary)
         except Exception as exc:  # noqa: BLE001
+            if _is_daily_token_limit(exc):
+                raise
             if _is_rate_limit(exc) and attempt < MAX_RETRIES - 1:
                 wait = BACKOFF_BASE * (2 ** attempt)
                 logger.warning("Rate limit (429). Backoff %.0fs (try %d/%d)...",
@@ -347,15 +397,27 @@ def main(argv=None):
     http_client = httpx.Client(verify=CA_BUNDLE) if CA_BUNDLE else None
     client = Groq(api_key=api_key, http_client=http_client)
 
+    ticker_counts = get_today_ticker_counts(conn, today)
+
     analysed = 0
     failed = 0
+    skipped_ticker_cap = 0
     for news_id, ticker, title, summary in to_analyse:
         if get_usage(conn, today) >= DAILY_CALL_LIMIT:
             logger.warning("Daily quota reached mid-run. Stopping.")
             break
+        if ticker_counts.get(ticker, 0) >= MAX_NEWS_PER_TICKER_PER_DAY:
+            skipped_ticker_cap += 1
+            continue
         try:
             result = analyse_with_retry(client, ticker, title, summary)
         except Exception as exc:  # noqa: BLE001
+            if _is_daily_token_limit(exc):
+                logger.warning(
+                    "Quota Groq quotidien (tokens/jour, TPD) atteint apres "
+                    "%d analyses reussies aujourd'hui. Arret du run: %s",
+                    analysed, exc)
+                break
             logger.error("news_id=%s: LLM call failed (%s)", news_id, exc)
             failed += 1
             continue
@@ -375,13 +437,18 @@ def main(argv=None):
             continue
 
         bump_usage(conn, today)
+        ticker_counts[ticker] = ticker_counts.get(ticker, 0) + 1
         analysed += 1
         if analysed % 10 == 0:
             logger.info("Progress: %d analysed (%d calls used today).",
                         analysed, get_usage(conn, today))
 
-    logger.info("Done. Analysed %d, failed %d. Calls used today: %d/%d.",
-                analysed, failed, get_usage(conn, today), DAILY_CALL_LIMIT)
+    logger.info(
+        "Done. Analysed %d, failed %d, skipped %d (plafond %d/ticker/jour "
+        "atteint). Calls used today: %d/%d. Tickers touches aujourd'hui: %d.",
+        analysed, failed, skipped_ticker_cap, MAX_NEWS_PER_TICKER_PER_DAY,
+        get_usage(conn, today), DAILY_CALL_LIMIT, len(ticker_counts),
+    )
     conn.close()
     return 0
 
