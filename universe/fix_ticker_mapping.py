@@ -39,7 +39,12 @@ applied automatically:
     Yahoo's own data, not a guess from memory -- but since it is not a
     documented, generalisable mechanical rule, it is reported for manual
     case-by-case validation only. Nothing in this category touches the
-    database.
+    database by default -- a human must review the printed report and pass
+    the approved OLD tickers explicitly via --apply-category-b, at which
+    point each one is re-validated once more (cheap insurance against a
+    stale report) before being written, with method
+    "category_b_manual_approval" in `ticker_corrections` so it stays
+    distinguishable from Category A's fully automatic fixes.
 
   Category C -- no validated candidate found at all (delisted, merged, or
     genuinely unidentifiable). Listed with a reason, no candidate proposed.
@@ -321,18 +326,22 @@ def diagnose(conn):
     return category_a, category_b, category_c
 
 
-def apply_category_a(conn, category_a):
+def apply_corrections(conn, rows, method):
+    """Write ticker corrections to `universe` + `ticker_corrections`. Shared
+    by Category A (always) and Category B (only for tickers explicitly
+    approved via --apply-category-b, after a human reviewed the printed
+    report -- see main())."""
     conn.execute(CREATE_CORRECTIONS_SQL)
     conn.commit()
     applied = []
-    for row in category_a:
+    for row in rows:
         old, new = row["ticker"], row["candidate"]
         try:
             conn.execute("UPDATE universe SET ticker = ? WHERE ticker = ?", (new, old))
             conn.execute(
                 "INSERT INTO ticker_corrections (old_ticker, new_ticker, pattern, method) "
                 "VALUES (?, ?, ?, ?)",
-                (old, new, row["pattern"], "mechanical_validated"),
+                (old, new, row.get("pattern", "search_lookup"), method),
             )
             conn.commit()
             applied.append(row)
@@ -340,6 +349,10 @@ def apply_category_a(conn, category_a):
             conn.rollback()
             logger.error("%s -> %s: DB update failed (%s)", old, new, exc)
     return applied
+
+
+def apply_category_a(conn, category_a):
+    return apply_corrections(conn, category_a, "mechanical_validated")
 
 
 def print_report(category_a, category_b, category_c, applied=None):
@@ -378,6 +391,12 @@ def parse_args(argv):
         description="Diagnose and mechanically fix total-failure universe tickers.")
     p.add_argument("--dry-run", action="store_true",
                     help="Report only, apply no database changes.")
+    p.add_argument("--apply-category-b", type=str, default=None,
+                    help="Comma-separated OLD tickers from Category B to apply "
+                         "after manual review of the printed report (e.g. "
+                         "--apply-category-b AIRP.PA,ATOS.PA,...). Category B "
+                         "is never applied without this explicit, per-ticker "
+                         "approval.")
     return p.parse_args(argv)
 
 
@@ -392,12 +411,45 @@ def main(argv=None):
     category_a, category_b, category_c = diagnose(conn)
 
     applied = None
+    applied_b = None
     if not args.dry_run:
         applied = apply_category_a(conn, category_a)
         logger.info("Categorie A appliquee: %d/%d tickers corriges dans universe.",
                     len(applied), len(category_a))
 
+        if args.apply_category_b:
+            approved = {t.strip().upper() for t in args.apply_category_b.split(",") if t.strip()}
+            selected = [r for r in category_b if r["ticker"] in approved]
+            missing = approved - {r["ticker"] for r in selected}
+            if missing:
+                logger.warning("Tickers demandes introuvables dans la categorie B "
+                                "(deja corriges ou jamais en echec ?): %s", sorted(missing))
+
+            # Re-validate right before writing -- the report may be a few
+            # minutes old, and this is a manual, one-off approval, not a
+            # routine automated path, so re-checking costs little and closes
+            # any staleness gap.
+            revalidated = []
+            for row in selected:
+                if validate_ticker(row["candidate"]):
+                    revalidated.append(row)
+                else:
+                    logger.error("%s -> %s: revalidation echouee juste avant "
+                                "application, ignore.", row["ticker"], row["candidate"])
+
+            applied_b = apply_corrections(conn, revalidated, "category_b_manual_approval")
+            logger.info("Categorie B approuvee manuellement: %d/%d demandes corriges dans universe.",
+                        len(applied_b), len(approved))
+
     print_report(category_a, category_b, category_c, applied=applied)
+    if applied_b:
+        print("=" * 100)
+        print(f"CATEGORIE B -- appliquee apres approbation manuelle ({len(applied_b)} tickers)")
+        print("=" * 100)
+        for r in applied_b:
+            print(f"  {r['ticker']:<12} -> {r['candidate']}")
+        print()
+
     conn.close()
     return 0
 
