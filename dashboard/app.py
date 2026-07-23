@@ -17,6 +17,7 @@ is shown over whatever snapshot history exists. RSI is not persisted in
 (real RSI-14 when enough history exists, otherwise a documented proxy).
 """
 
+import html
 import os
 import sqlite3
 import sys
@@ -32,6 +33,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from analysis.combined_score import compute_rsi, proxy_rsi  # noqa: E402
+from dashboard.glossaire import GLOSSAIRE, highlight_terms, term_span  # noqa: E402
 from reasoning.daily_summary import (  # noqa: E402
     MIN_CONFIDENCE, add_argued_texts, build_daily_summary,
 )
@@ -194,26 +196,30 @@ def render_detail(df):
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Current price", f"${row['current_price']:.2f}")
-    c2.metric("MA 50", f"${row['ma_50']:.2f}")
-    c3.metric("MA 200", f"${row['ma_200']:.2f}")
+    c2.metric("MA 50", f"${row['ma_50']:.2f}", help=GLOSSAIRE["MA 50"])
+    c3.metric("MA 200", f"${row['ma_200']:.2f}", help=GLOSSAIRE["MA 200"])
 
     c4, c5, c6 = st.columns(3)
     volume = row["volume"]
-    c4.metric("Volume", f"{int(volume):,}" if pd.notna(volume) else "N/A")
+    c4.metric("Volume", f"{int(volume):,}" if pd.notna(volume) else "N/A",
+              help=GLOSSAIRE["Volume"])
     vol = row["volatility"]
-    c5.metric("Volatility", f"{vol:.2%}" if pd.notna(vol) else "N/A")
+    c5.metric("Volatility", f"{vol:.2%}" if pd.notna(vol) else "N/A",
+              help=GLOSSAIRE["Volatility"])
     rsi_label = f"{row['rsi']:.1f}" + ("" if row["rsi_is_real"] else " (proxy)")
-    c6.metric("RSI (14)", rsi_label)
+    c6.metric("RSI (14)", rsi_label, help=GLOSSAIRE["RSI"])
 
     st.markdown("**Scores**")
     s1, s2, s3 = st.columns(3)
-    s1.metric("Prix/Valorisation", f"{row['price_valuation_score']:.1f}")
-    s2.metric("Technical", f"{row['technical_score']:.1f}")
-    s3.metric("Volatility score", f"{row['volatility_score']:.1f}")
+    s1.metric("Prix/Valorisation", f"{row['price_valuation_score']:.1f}",
+              help=GLOSSAIRE["Prix/Valorisation"])
+    s2.metric("Technical", f"{row['technical_score']:.1f}", help=GLOSSAIRE["Technical"])
+    s3.metric("Volatility score", f"{row['volatility_score']:.1f}",
+              help=GLOSSAIRE["Volatility"])
     s4, s5, s6 = st.columns(3)
-    s4.metric("Volume score", f"{row['volume_score']:.1f}")
-    s5.metric("Final score", f"{row['final_score']:.1f}")
-    s6.metric("Confidence", f"{row['confidence']:.0f}%")
+    s4.metric("Volume score", f"{row['volume_score']:.1f}", help=GLOSSAIRE["Volume"])
+    s5.metric("Final score", f"{row['final_score']:.1f}", help=GLOSSAIRE["Final score"])
+    s6.metric("Confidence", f"{row['confidence']:.0f}%", help=GLOSSAIRE["Confidence"])
 
     return symbol
 
@@ -536,7 +542,8 @@ def render_opportunities_page():
     st.caption(f"Calcule le {df['date_calcul'].iloc[0]} - {len(df)} tickers")
 
     priorites = ["toutes"] + load_universe_priorities()
-    choice = st.selectbox("Priorite univers", priorites, key="opp_priorite")
+    choice = st.selectbox("Priorite univers", priorites, key="opp_priorite",
+                           help=GLOSSAIRE["Priorite"])
     sub = df if choice == "toutes" else df[df["priorite"] == choice]
 
     if sub.empty:
@@ -585,10 +592,14 @@ def render_opportunities_page():
     st.markdown(f"#### {row['ticker']} -- {row['nom_affiche']}")
     c1, c2, c3 = st.columns(3)
     score = row["score_global"]
-    c1.metric("Score global", f"{score:.1f}" if pd.notna(score) else "n/a")
-    c2.metric("Confiance", f"{row['confiance']:.0f}%")
-    c3.metric("Priorite univers", row["priorite"])
-    st.write(row["explication"])
+    c1.metric("Score global", f"{score:.1f}" if pd.notna(score) else "n/a",
+              help=GLOSSAIRE["Score global"])
+    c2.metric("Confiance", f"{row['confiance']:.0f}%", help=GLOSSAIRE["Confiance"])
+    c3.metric("Priorite univers", row["priorite"], help=GLOSSAIRE["Priorite"])
+    if pd.notna(row["explication"]):
+        st.markdown(highlight_terms(row["explication"]), unsafe_allow_html=True)
+    else:
+        st.write(row["explication"])
 
 
 # --- Resume du jour ----------------------------------------------------------
@@ -643,40 +654,45 @@ def render_daily_summary_page():
             c1, c2, c3 = st.columns([2, 1, 1])
             c1.markdown(f"### #{rank}  {s['ticker']} -- {s['nom_affiche']}")
             c2.metric("Score ajuste", f"{s['score_ajuste']:.1f}",
-                      help="score_global x (confiance / 100)")
-            c3.metric("Confiance", f"{s['confiance']:.0f}%")
+                      help=GLOSSAIRE["Score ajuste"])
+            c3.metric("Confiance", f"{s['confiance']:.0f}%", help=GLOSSAIRE["Confiance"])
 
             if s.get("texte_argumente"):
-                st.markdown(f"##### {s['texte_argumente']}")
+                st.markdown(f"##### {highlight_terms(s['texte_argumente'])}",
+                            unsafe_allow_html=True)
 
             risk_bg = RISK_COLOR.get(s["risque"], COLOR_MID)
+            risk_tip = html.escape(GLOSSAIRE["Risque"], quote=True)
             conflict_note = " - composantes structurelles en contradiction" if s["conflit_composantes"] else ""
             st.markdown(
                 f"<span style='background-color:{risk_bg};color:white;"
-                f"padding:2px 10px;border-radius:12px;font-size:0.85em'>"
+                f"padding:2px 10px;border-radius:12px;font-size:0.85em;"
+                f"cursor:help;' title=\"{risk_tip}\">"
                 f"Risque : {s['risque']}</span>"
                 f"<span style='font-size:0.85em;color:gray;'>{conflict_note}</span>",
                 unsafe_allow_html=True,
             )
             st.caption(s["horizon"])
 
+            def _entreprises_a_surveiller_block(surveiller):
+                st.markdown(term_span("Entreprises a surveiller", "Entreprises a surveiller"),
+                            unsafe_allow_html=True)
+                for rtype, names in surveiller.items():
+                    st.markdown(f"- **{rtype}** : {', '.join(names)}")
+
             if s.get("texte_argumente"):
                 with st.expander("Detail des composantes (donnees structurees)"):
-                    st.write(s["explication"])
+                    st.markdown(highlight_terms(s["explication"]), unsafe_allow_html=True)
                     if s["volatilite"] is not None:
                         st.caption(f"Volatilite annualisee : {s['volatilite']:.0%}")
                     if s["entreprises_a_surveiller"]:
-                        st.markdown("**Entreprises a surveiller**")
-                        for rtype, names in s["entreprises_a_surveiller"].items():
-                            st.markdown(f"- **{rtype}** : {', '.join(names)}")
+                        _entreprises_a_surveiller_block(s["entreprises_a_surveiller"])
             else:
-                st.write(s["explication"])
+                st.markdown(highlight_terms(s["explication"]), unsafe_allow_html=True)
                 if s["volatilite"] is not None:
                     st.caption(f"Volatilite annualisee : {s['volatilite']:.0%}")
                 if s["entreprises_a_surveiller"]:
-                    st.markdown("**Entreprises a surveiller**")
-                    for rtype, names in s["entreprises_a_surveiller"].items():
-                        st.markdown(f"- **{rtype}** : {', '.join(names)}")
+                    _entreprises_a_surveiller_block(s["entreprises_a_surveiller"])
 
 
 # --- Pages ------------------------------------------------------------------

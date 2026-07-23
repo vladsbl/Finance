@@ -145,3 +145,35 @@ def test_page_news_loads_without_error():
 def test_page_graph_loads_without_error():
     at = AppTest.from_function(_run_page_graph, default_timeout=60).run()
     assert not at.exception, f"page_graph raised: {list(at.exception)}"
+
+
+def test_glossaire_loads_with_expected_terms():
+    """The glossary dict backing the dashboard's tooltips must load and
+    cover the key terms named when it was introduced (RSI, momentum,
+    moving average, technical/price-valuation/fundamental scores,
+    confidence, volatility, priority)."""
+    from dashboard.glossaire import GLOSSAIRE
+    assert len(GLOSSAIRE) > 0
+    expected = {
+        "RSI", "Momentum technique", "Moyenne mobile", "Score technique",
+        "Prix/Valorisation", "Fondamental reel", "Confiance", "Volatilite",
+        "Breakout", "Priorite",
+    }
+    missing = expected - set(GLOSSAIRE)
+    assert not missing, f"Glossary missing expected terms: {missing}"
+    for term, explanation in GLOSSAIRE.items():
+        assert explanation.strip(), f"Empty explanation for term {term!r}"
+
+
+def test_highlight_terms_wraps_known_terms_in_tooltip_spans():
+    """highlight_terms() must wrap recognised terms in a span carrying the
+    explanation as its title (native browser tooltip), and must escape the
+    source text (defence against LLM-generated / externally-scraped
+    content being rendered as raw HTML)."""
+    from dashboard.glossaire import highlight_terms
+    out = highlight_terms("Prix/Valorisation solide (62/100) | Confiance 87%")
+    assert "<span" in out and "title=" in out
+    assert "Prix/Valorisation" in out
+
+    escaped = highlight_terms("<script>alert(1)</script> Confiance 50%")
+    assert "<script>" not in escaped
