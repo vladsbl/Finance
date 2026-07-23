@@ -93,7 +93,12 @@ def _to_int(value):
     return int(f) if f is not None else None
 
 
-def load_tickers(conn, priorite, limit):
+def load_tickers(conn, priorite, limit, explicit_tickers=None):
+    """--priorite/--limit contract, plus an optional --tickers override for
+    ad-hoc / targeted re-runs (e.g. after universe/fix_ticker_mapping.py
+    corrects a handful of tickers)."""
+    if explicit_tickers:
+        return explicit_tickers
     if priorite == "toutes":
         sql = "SELECT ticker FROM universe ORDER BY priorite, ticker"
         params = ()
@@ -178,6 +183,9 @@ def parse_args(argv):
     p.add_argument("--priorite", default="toutes",
                    choices=["haute", "moyenne", "basse", "toutes"])
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--tickers", type=str, default=None,
+                   help="Comma-separated explicit ticker list, overrides "
+                        "--priorite/--limit.")
     p.add_argument("--batch-size", type=int, default=50)
     p.add_argument("--pause", type=float, default=3.0)
     p.add_argument("--period", default="1y")
@@ -187,6 +195,9 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
+    explicit_tickers = None
+    if args.tickers:
+        explicit_tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
 
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -197,7 +208,7 @@ def main(argv=None):
         return 1
 
     try:
-        tickers = load_tickers(conn, args.priorite, args.limit)
+        tickers = load_tickers(conn, args.priorite, args.limit, explicit_tickers)
     except sqlite3.Error as exc:
         logger.error("Could not read universe (run universe/build_universe.py): %s", exc)
         conn.close()

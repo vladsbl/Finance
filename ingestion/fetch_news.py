@@ -260,12 +260,27 @@ def ensure_table(conn):
     conn.commit()
 
 
-def load_tickers(conn, priorite, limit):
+def load_tickers(conn, priorite, limit, explicit_tickers=None):
     """Return [(ticker, priorite), ...] from the universe table.
 
     Mirrors ingestion/ingest_universe_prices.py's --priorite/--limit contract
-    for consistency across the two large-scale ingestion scripts.
+    for consistency across the two large-scale ingestion scripts. An optional
+    --tickers override (e.g. after universe/fix_ticker_mapping.py corrects a
+    handful of tickers) still looks up each ticker's real priorite from
+    `universe` -- needed downstream to decide Finnhub eligibility -- rather
+    than guessing it.
     """
+    if explicit_tickers:
+        placeholders = ",".join("?" for _ in explicit_tickers)
+        rows = conn.execute(
+            f"SELECT ticker, priorite FROM universe WHERE ticker IN ({placeholders})",
+            explicit_tickers,
+        ).fetchall()
+        found = {t for t, _ in rows}
+        missing = [t for t in explicit_tickers if t not in found]
+        if missing:
+            logger.warning("Tickers absents de universe, ignores: %s", missing)
+        return rows
     if priorite == "toutes":
         sql = "SELECT ticker, priorite FROM universe ORDER BY priorite, ticker"
         params = ()
@@ -322,6 +337,9 @@ def parse_args(argv):
     p.add_argument("--priorite", default="toutes",
                    choices=["haute", "moyenne", "basse", "toutes"])
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--tickers", type=str, default=None,
+                   help="Comma-separated explicit ticker list, overrides "
+                        "--priorite/--limit.")
     p.add_argument("--batch-size", type=int, default=50)
     p.add_argument("--pause", type=float, default=3.0)
     return p.parse_args(argv)
@@ -329,6 +347,9 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
+    explicit_tickers = None
+    if args.tickers:
+        explicit_tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
 
     load_dotenv()
     finnhub_key = os.getenv("FINNHUB_API_KEY")
@@ -344,7 +365,7 @@ def main(argv=None):
         return 1
 
     try:
-        tickers = load_tickers(conn, args.priorite, args.limit)
+        tickers = load_tickers(conn, args.priorite, args.limit, explicit_tickers)
     except sqlite3.Error as exc:
         logger.error("Could not read universe (run universe/build_universe.py): %s", exc)
         conn.close()

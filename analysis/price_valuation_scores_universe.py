@@ -98,8 +98,12 @@ VALUES
 
 # --- Data access -----------------------------------------------------------
 
-def load_tickers(conn, priorite, limit):
-    """Same --priorite/--limit contract as the other universe-scale scripts."""
+def load_tickers(conn, priorite, limit, explicit_tickers=None):
+    """Same --priorite/--limit contract as the other universe-scale scripts,
+    plus an optional --tickers override for ad-hoc / targeted re-runs (e.g.
+    after universe/fix_ticker_mapping.py corrects a handful of tickers)."""
+    if explicit_tickers:
+        return explicit_tickers
     if priorite == "toutes":
         sql = "SELECT ticker FROM universe ORDER BY priorite, ticker"
         params = ()
@@ -247,6 +251,9 @@ def parse_args(argv):
     p.add_argument("--priorite", default="toutes",
                    choices=["haute", "moyenne", "basse", "toutes"])
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--tickers", type=str, default=None,
+                   help="Comma-separated explicit ticker list, overrides "
+                        "--priorite/--limit.")
     p.add_argument("--batch-size", type=int, default=40)
     p.add_argument("--pause", type=float, default=0.5)
     return p.parse_args(argv)
@@ -254,6 +261,9 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
+    explicit_tickers = None
+    if args.tickers:
+        explicit_tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
 
     if not os.path.exists(DB_PATH):
         logger.error("Database not found at %s.", DB_PATH)
@@ -263,7 +273,7 @@ def main(argv=None):
     conn.execute(PRICE_VAL_CREATE_TABLE_SQL)
     conn.commit()
 
-    tickers = load_tickers(conn, args.priorite, args.limit)
+    tickers = load_tickers(conn, args.priorite, args.limit, explicit_tickers)
     if not tickers:
         logger.warning("No tickers for priorite=%s. Nothing to do.", args.priorite)
         conn.close()
