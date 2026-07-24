@@ -283,8 +283,11 @@ def render_chart(df, history, symbol):
     fig.update_layout(
         title=f"{symbol} - price vs moving averages ({len(prices)} trading days)",
         xaxis_title="Date", yaxis_title="Price ($)",
-        height=440, margin=dict(t=50, b=40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        height=470, margin=dict(t=50, b=70),
+        # Legend below the plot (not above, alongside the title) -- the
+        # previous y=1.02/x=0 placement shared the same top-left corner as
+        # the title, so the two visually overlapped.
+        legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
         hovermode="x unified",
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -465,9 +468,58 @@ def _graph_html(graph, names):
     # <body> keeps the browser's default white margin, showing up as a thin
     # bright edge around an otherwise dark graph. One extra style rule closes
     # that gap without touching pyvis's own generated markup.
-    return html_out.replace(
+    html_out = html_out.replace(
         "</head>", "<style>body{background:#0b111a;margin:0;}</style></head>", 1
     )
+    # Mouse-only zoom/pan (wheel + drag) has no visible affordance and is easy
+    # to get lost in. pyvis's own template calls drawGraph() synchronously
+    # (see the script right before </body>), so the global `network` variable
+    # already holds the live vis-network instance by the time this script
+    # runs -- no need to wait for a load event. moveTo({scale}) and fit() are
+    # vis-network's real public API (there is no network.zoom() method).
+    controls = """
+<div style="position:fixed;top:12px;right:12px;z-index:1000;
+            display:flex;flex-direction:column;gap:6px;">
+  <button onclick="__graphZoomIn()" title="Zoom avant" class="graph-ctrl-btn">+</button>
+  <button onclick="__graphZoomOut()" title="Zoom arriere" class="graph-ctrl-btn">&minus;</button>
+  <button onclick="__graphRecenter()" title="Recentrer la vue" class="graph-ctrl-btn">&#10021;</button>
+</div>
+<style>
+.graph-ctrl-btn {
+    width: 32px; height: 32px;
+    background: rgba(11,17,26,0.85);
+    border: 1px solid rgba(95,227,255,0.45);
+    color: #5fe3ff;
+    border-radius: 6px;
+    font-size: 16px;
+    font-family: 'Share Tech Mono', monospace, sans-serif;
+    cursor: pointer;
+    box-shadow: 0 0 8px rgba(34,211,238,0.15);
+}
+.graph-ctrl-btn:hover {
+    background: rgba(11,17,26,1);
+    border-color: #7ee8ff;
+    box-shadow: 0 0 14px rgba(34,211,238,0.4);
+}
+</style>
+<script>
+function __graphZoomIn() {
+    if (typeof network === "undefined" || !network) return;
+    network.moveTo({scale: network.getScale() * 1.25,
+                     animation: {duration: 200, easingFunction: "easeInOutQuad"}});
+}
+function __graphZoomOut() {
+    if (typeof network === "undefined" || !network) return;
+    network.moveTo({scale: network.getScale() * 0.8,
+                     animation: {duration: 200, easingFunction: "easeInOutQuad"}});
+}
+function __graphRecenter() {
+    if (typeof network === "undefined" || !network) return;
+    network.fit({animation: {duration: 300, easingFunction: "easeInOutQuad"}});
+}
+</script>
+"""
+    return html_out.replace("</body>", controls + "</body>", 1)
 
 
 def render_graph_page():
@@ -577,9 +629,13 @@ def render_opportunities_page():
 
     st.caption(f"Calcule le {df['date_calcul'].iloc[0]} - {len(df)} tickers")
 
+    # A fixed, tiny set of options (4 tiers) is a click choice, not something
+    # to search for -- st.pills (pure click, no text input) avoids the false
+    # "you can type here" affordance a searchable st.selectbox gives for a
+    # list this short.
     priorites = ["toutes"] + load_universe_priorities()
-    choice = st.selectbox("Priorite univers", priorites, key="opp_priorite",
-                           help=GLOSSAIRE["Priorite"])
+    choice = st.pills("Priorite univers", priorites, key="opp_priorite",
+                       default="toutes", required=True, help=GLOSSAIRE["Priorite"])
     sub = df if choice == "toutes" else df[df["priorite"] == choice]
 
     if sub.empty:
