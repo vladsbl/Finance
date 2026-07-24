@@ -40,11 +40,35 @@ from reasoning.daily_summary import (  # noqa: E402
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
 
-# Score thresholds for colour coding.
+# Score thresholds for colour coding. These are cell/badge BACKGROUND colours
+# with white text on top (see color_row()/RISK_COLOR), so their contrast is
+# independent of the page's own background -- chosen/verified here for a
+# >=4.5:1 white-text contrast ratio (WCAG AA), which the original light-theme
+# values (#1b8a3a / #c77d0a / #b3261e) did not all meet: MID in particular
+# was ~3.3:1 (fails AA) before this pass. Darkened rather than brightened,
+# since brightening a badge background always REDUCES contrast with white
+# text -- the "neon" look here comes from the surrounding dark theme
+# (style.css) and glow effects, not from the badges being bright themselves.
 GOOD, WEAK = 60.0, 40.0
-COLOR_GOOD = "#1b8a3a"
-COLOR_MID = "#c77d0a"
-COLOR_BAD = "#b3261e"
+COLOR_GOOD = "#0a7a45"  # deep emerald, ~6.6:1 vs white
+COLOR_MID = "#9c6108"   # deep amber, ~5.1:1 vs white
+COLOR_BAD = "#a81f2d"   # deep crimson, ~7.3:1 vs white
+
+STYLE_CSS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "style.css")
+
+
+def inject_style():
+    """Load dashboard/style.css once and inject it as global page CSS (the
+    "Jarvis" reskin: dark background, cyan glow, futuristic fonts). Paired
+    with .streamlit/config.toml (dark base theme) for native widget colours;
+    this only adds the flourishes on top. Called once from main(), before
+    any page renders, so every page inherits it without per-page code."""
+    try:
+        with open(STYLE_CSS_PATH, "r", encoding="utf-8") as f:
+            css = f.read()
+    except OSError:
+        return
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 
 # --- Data access -----------------------------------------------------------
@@ -412,10 +436,14 @@ def _graph_html(graph, names):
     `names` (falls back to the bare ticker if not found) instead of just the
     ticker, so the graph is as readable as the external nodes (which already
     carry a real company name from the relations data)."""
+    # pyvis renders into a self-contained iframe (components.html), which the
+    # page's global CSS (dashboard/style.css) cannot reach -- colours must be
+    # set here directly so the graph matches the dark "Jarvis" theme instead
+    # of showing up as a stark white rectangle on the dark page.
     from pyvis.network import Network
     net = Network(height="560px", width="100%", directed=True,
-                  cdn_resources="in_line", bgcolor="#ffffff",
-                  font_color="#222222")
+                  cdn_resources="in_line", bgcolor="#0b111a",
+                  font_color="#dce8f5")
     net.repulsion(node_distance=160, spring_length=140)
     for node, d in graph.nodes(data=True):
         primary = d["kind"] == "primary"
@@ -427,11 +455,19 @@ def _graph_html(graph, names):
             label = d["label"]
             title = f"{d['label']} ({d['ticker']})" if d["ticker"] else d["label"]
         net.add_node(node, label=label, title=title,
-                     color=COLOR_GOOD if primary else "#9aa0a6",
+                     color="#22d3ee" if primary else "#94a3b8",
                      size=26 if primary else 16)
     for u, v, d in graph.edges(data=True):
-        net.add_edge(u, v, label=d["relation"], title=d.get("notes", ""))
-    return net.generate_html(notebook=False)
+        net.add_edge(u, v, label=d["relation"], title=d.get("notes", ""),
+                     color="#3b82a6")
+    html_out = net.generate_html(notebook=False)
+    # pyvis only colours the #mynetwork container itself; the surrounding
+    # <body> keeps the browser's default white margin, showing up as a thin
+    # bright edge around an otherwise dark graph. One extra style rule closes
+    # that gap without touching pyvis's own generated markup.
+    return html_out.replace(
+        "</head>", "<style>body{background:#0b111a;margin:0;}</style></head>", 1
+    )
 
 
 def render_graph_page():
@@ -746,6 +782,7 @@ def page_opportunities():
 
 def main():
     st.set_page_config(page_title="Market Intelligence Dashboard", layout="wide")
+    inject_style()
     st.title("Market Intelligence Dashboard")
 
     pages = [

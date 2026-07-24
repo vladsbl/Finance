@@ -1,0 +1,90 @@
+/* Light "Jarvis" reskin -- dark navy background, electric-cyan accents,
+   subtle glow on key elements. Palette/typography/effects only: no layout
+   or component restructuring. Pairs with .streamlit/config.toml (dark base
+   theme) which handles native widget colors (selectbox, dataframe chrome,
+   sidebar) so this file only needs to add the flourishes Streamlit's own
+   theme system doesn't cover: fonts, glow, gradients, accent borders. */
+
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap');
+
+/* --- Page background: deep navy, not pure black ------------------------- */
+.stApp {
+    background: radial-gradient(ellipse at top, #0d1520 0%, #05070a 70%);
+}
+
+/* --- Headings: futuristic font + soft cyan glow -------------------------- */
+h1, h2, h3, h4,
+[data-testid="stHeading"] h1,
+[data-testid="stHeading"] h2,
+[data-testid="stHeading"] h3 {
+    font-family: 'Orbitron', sans-serif !important;
+    color: #5fe3ff !important;
+    text-shadow: 0 0 10px rgba(95, 227, 255, 0.45), 0 0 2px rgba(95, 227, 255, 0.7);
+    letter-spacing: 0.02em;
+}
+
+/* --- Metrics: monospace glowing values, small caps labels ---------------- */
+div[data-testid="stMetric"] {
+    background: rgba(17, 26, 38, 0.55);
+    border: 1px solid rgba(95, 227, 255, 0.28);
+    border-radius: 10px;
+    padding: 0.65rem 0.9rem;
+    box-shadow: 0 0 14px rgba(34, 211, 238, 0.10), inset 0 0 18px rgba(34, 211, 238, 0.05);
+}
+div[data-testid="stMetricValue"] {
+    font-family: 'Share Tech Mono', monospace !important;
+    color: #6ee7d8 !important;
+    text-shadow: 0 0 6px rgba(110, 231, 216, 0.45);
+}
+[data-testid="stMetricLabel"],
+[data-testid="stMetricLabel"] p {
+    color: #8ec9f2 !important;
+    font-family: 'Orbitron', sans-serif !important;
+    font-size: 0.72rem !important;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+/* --- Dataframes / tables: cyan hairline border --------------------------- */
+div[data-testid="stDataFrame"], div[data-testid="stTable"] {
+    border: 1px solid rgba(95, 227, 255, 0.22);
+    border-radius: 8px;
+}
+
+/* --- Containers used for "Resume du jour" signal cards ------------------- */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-color: rgba(95, 227, 255, 0.22) !important;
+    box-shadow: 0 0 16px rgba(34, 211, 238, 0.06);
+}
+
+/* --- Sidebar --------------------------------------------------------------*/
+section[data-testid="stSidebar"] {
+    background: #060a12;
+    border-right: 1px solid rgba(95, 227, 255, 0.15);
+}
+
+/* --- Buttons --------------------------------------------------------------*/
+.stButton > button {
+    background: linear-gradient(135deg, #0f2f45, #123a52);
+    color: #7ee8ff;
+    border: 1px solid rgba(95, 227, 255, 0.45);
+    box-shadow: 0 0 8px rgba(95, 227, 255, 0.18);
+    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.stButton > button:hover {
+    box-shadow: 0 0 16px rgba(95, 227, 255, 0.45);
+    border-color: #7ee8ff;
+    color: #ffffff;
+}
+
+/* --- Dividers / captions ---------------------------------------------------*/
+hr { border-color: rgba(95, 227, 255, 0.22) !important; }
+[data-testid="stCaptionContainer"] { color: #7c93ad !important; }
+
+/* --- Glossary tooltip underline (see dashboard/glossaire.py) -- keep the
+   dotted underline visible against the dark background; text colour itself
+   is left inherited from the surrounding paragraph (already light on this
+   theme via config.toml's textColor), only the affordance colour changes. */
+span[title] {
+    border-bottom-color: rgba(125, 211, 252, 0.65) !important;
+}
