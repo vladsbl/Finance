@@ -191,6 +191,21 @@ def load_opportunites_for_date(conn, data_date):
     ).fetchall()
 
 
+def load_opportunite_for_ticker(conn, ticker):
+    """The single latest opportunites row for one specific ticker (any
+    date_calcul, most recent first), or None if it has never been scored by
+    reasoning/opportunity_scoring.py, or was scored but every component
+    failed (score_global IS NULL). Used by dashboard/app.py's "Analyse d'une
+    action" page to build an on-demand build_signal() for ANY ticker, not
+    just the tickers in today's top N."""
+    conn.row_factory = sqlite3.Row
+    return conn.execute(
+        "SELECT * FROM opportunites WHERE ticker = ? AND score_global IS NOT NULL "
+        "ORDER BY date_calcul DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+
+
 def resolve_data_date(conn, explicit_date):
     """The date_calcul to actually use: `explicit_date` if given (e.g. the
     CLI's --date override, for testing a specific past snapshot), otherwise
@@ -273,24 +288,26 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 MAX_RETRIES = 5      # for 429 rate-limit backoff, same as analyze_news.py
 BACKOFF_BASE = 2.0   # seconds: 2, 4, 8, 16, 32
 
-# At most TOP_N signals/day, so this is naturally capped -- kept as an
-# explicit constant (rather than reusing TOP_N directly) so the quota is
-# self-documenting and easy to retune independently of the ranking size.
-DAILY_LLM_CALL_LIMIT = 3
+# Two SEPARATE daily quota pools, each its own table, so browsing dozens of
+# tickers/day on "Analyse d'une action" (dashboard/app.py) can never block --
+# or be blocked by -- Resume du jour's own 3 signals. Both stay comfortably
+# within Groq's real ceiling (~270-290 analyses/day observed, tied to the
+# free tier's 100k-tokens/day limit, not a request-count limit): 3 + 10 = 13
+# combined worst case, nowhere close.
+DAILY_LLM_CALL_LIMIT = 3            # Resume du jour (its TOP_N signals)
+TICKER_ANALYSIS_DAILY_LIMIT = 10    # "Analyse d'une action", any ticker on demand
 
-CREATE_SUMMARY_USAGE_SQL = """
-CREATE TABLE IF NOT EXISTS llm_usage_summary (
-    day   TEXT PRIMARY KEY,
-    calls INTEGER NOT NULL DEFAULT 0
-);
-"""
+USAGE_TABLE_SUMMARY = "llm_usage_summary"
+USAGE_TABLE_TICKER_ANALYSIS = "llm_usage_ticker_analysis"
 
 # Persisted so the same day's argued text is reused by every consumer (CLI
 # run, dashboard page load, dashboard refresh) instead of being regenerated
 # -- without this, whichever process happens to run first would burn the
 # whole day's quota and every other consumer would silently see the
 # structured-only fallback for the rest of the day, even though the text had
-# already been produced once.
+# already been produced once. Shared across BOTH quota pools above: a ticker
+# generated via either entry point is cached under the same (day, ticker)
+# key, so the two features never pay twice for the same ticker/day.
 CREATE_ARGUMENTS_SQL = """
 CREATE TABLE IF NOT EXISTS daily_summary_arguments (
     day        TEXT NOT NULL,
@@ -320,17 +337,27 @@ def _is_rate_limit(exc):
     return status == 429 or "429" in str(exc) or "rate limit" in str(exc).lower()
 
 
-def get_summary_usage(conn, day):
-    row = conn.execute(
-        "SELECT calls FROM llm_usage_summary WHERE day = ?", (day,)
-    ).fetchone()
+def _create_usage_table_sql(table):
+    # `table` is always one of the two hardcoded constants above (never
+    # external/user input), so this f-string is not an injection risk --
+    # sqlite3 has no parameter placeholder for identifiers.
+    return (
+        f"CREATE TABLE IF NOT EXISTS {table} ("
+        f"    day   TEXT PRIMARY KEY,"
+        f"    calls INTEGER NOT NULL DEFAULT 0"
+        f");"
+    )
+
+
+def get_usage(conn, table, day):
+    row = conn.execute(f"SELECT calls FROM {table} WHERE day = ?", (day,)).fetchone()
     return row[0] if row else 0
 
 
-def bump_summary_usage(conn, day):
+def bump_usage(conn, table, day):
     conn.execute(
-        "INSERT INTO llm_usage_summary (day, calls) VALUES (?, 1) "
-        "ON CONFLICT(day) DO UPDATE SET calls = calls + 1",
+        f"INSERT INTO {table} (day, calls) VALUES (?, 1) "
+        f"ON CONFLICT(day) DO UPDATE SET calls = calls + 1",
         (day,),
     )
     conn.commit()
@@ -408,15 +435,28 @@ def generate_with_retry(client, signal):
     return None
 
 
-def add_argued_texts(conn, signals):
+def add_argued_texts(conn, signals, usage_table=USAGE_TABLE_SUMMARY,
+                      call_limit=DAILY_LLM_CALL_LIMIT):
     """Best-effort enrichment: sets signal["texte_argumente"] for each signal,
     reusing a cached text from `daily_summary_arguments` when today's text for
     that ticker was already generated (by an earlier CLI run or dashboard
-    load), and generating fresh ones via Groq for the rest, up to
-    DAILY_LLM_CALL_LIMIT NEW calls/day. Never raises -- any failure (missing
-    key, no network, quota exhausted, API error) just leaves the affected
-    signal(s) at texte_argumente=None, and callers (CLI print, dashboard)
-    fall back to the pre-existing structured-only presentation."""
+    load, via EITHER caller below), and generating fresh ones via Groq for
+    the rest, up to `call_limit` NEW calls/day drawn from `usage_table`.
+    Never raises -- any failure (missing key, no network, quota exhausted,
+    API error) just leaves the affected signal(s) at texte_argumente=None,
+    and callers (CLI print, dashboard) fall back to the pre-existing
+    structured-only presentation.
+
+    Two distinct callers, two distinct quota pools (never mixed):
+      * reasoning/daily_summary.py's own build_daily_summary() (today's
+        TOP_N signals) -- defaults: USAGE_TABLE_SUMMARY, DAILY_LLM_CALL_LIMIT.
+      * dashboard/app.py's "Analyse d'une action" (any ticker, on demand) --
+        passes USAGE_TABLE_TICKER_ANALYSIS, TICKER_ANALYSIS_DAILY_LIMIT
+        explicitly, so browsing dozens of tickers/day can never exhaust (or
+        be exhausted by) Resume du jour's own 3-call/day budget.
+    Both share the SAME daily_summary_arguments cache table/key (day,
+    ticker): whichever caller generates a ticker's text first, the other
+    reuses it for free."""
     for s in signals:
         s.setdefault("texte_argumente", None)
 
@@ -439,12 +479,12 @@ def add_argued_texts(conn, signals):
     today_real = date.today().isoformat()
 
     try:
-        conn.execute(CREATE_SUMMARY_USAGE_SQL)
+        conn.execute(_create_usage_table_sql(usage_table))
         conn.execute(CREATE_ARGUMENTS_SQL)
         conn.commit()
     except sqlite3.Error as exc:
-        logger.warning("Tables llm_usage_summary/daily_summary_arguments "
-                        "indisponibles (%s). Repli sur presentation structuree.", exc)
+        logger.warning("Table %s/daily_summary_arguments indisponible (%s). "
+                        "Repli sur presentation structuree.", usage_table, exc)
         return
 
     pending = []
@@ -458,12 +498,12 @@ def add_argued_texts(conn, signals):
     if not pending:
         return
 
-    used = get_summary_usage(conn, today_real)
-    remaining = max(0, DAILY_LLM_CALL_LIMIT - used)
+    used = get_usage(conn, usage_table, today_real)
+    remaining = max(0, call_limit - used)
     if remaining <= 0:
-        logger.info("Quota LLM resume (%d/jour) deja atteint (%d utilises). "
+        logger.info("Quota LLM (%s, %d/jour) deja atteint (%d utilises). "
                      "Repli sur presentation structuree pour les tickers restants.",
-                     DAILY_LLM_CALL_LIMIT, used)
+                     usage_table, call_limit, used)
         return
 
     from dotenv import load_dotenv
@@ -497,7 +537,7 @@ def add_argued_texts(conn, signals):
             continue
         s["texte_argumente"] = text
         save_argument(conn, today_real, s["ticker"], text)
-        bump_summary_usage(conn, today_real)
+        bump_usage(conn, usage_table, today_real)
 
 
 # --- Orchestration ---------------------------------------------------------
@@ -526,37 +566,48 @@ def build_daily_summary(conn, today=None):
 
     relations = load_relations(conn)
     graph = build_graph(relations)
-
-    signals = []
-    for r in top:
-        closes = load_price_series(conn, r["ticker"])
-        volatility = compute_volatility(closes) if closes else None
-        conflict = has_conflict(
-            r["score_prix_valorisation"], r["score_technique"], r["score_fondamental_reel"]
-        )
-        risk = compute_risk(volatility, r["confiance"], conflict)
-        watch = companies_to_watch(graph, relations, r["ticker"])
-        nom_affiche = load_display_name(conn, r["ticker"])
-
-        signals.append({
-            "ticker": r["ticker"],
-            "nom_affiche": nom_affiche,
-            "score_global": r["score_global"],
-            "confiance": r["confiance"],
-            "score_ajuste": compute_adjusted_score(r["score_global"], r["confiance"]),
-            "score_prix_valorisation": r["score_prix_valorisation"],
-            "score_technique": r["score_technique"],
-            "score_news": r["score_news"],
-            "score_fondamental_reel": r["score_fondamental_reel"],
-            "explication": r["explication"],
-            "risque": risk,
-            "conflit_composantes": conflict,
-            "volatilite": volatility,
-            "horizon": HORIZON_LABEL,
-            "entreprises_a_surveiller": watch,
-        })
+    signals = [build_signal(conn, r, graph, relations) for r in top]
 
     return signals, data_date, len(eligible)
+
+
+def build_signal(conn, row, graph, relations):
+    """Build one `signals` entry (see build_daily_summary's docstring) from
+    a single `opportunites` row. Extracted so build_daily_summary() (today's
+    top N) and dashboard/app.py's per-ticker "Analyse d'une action" AI
+    section (any ticker, on demand) share the exact same construction --
+    they must never drift apart into two slightly different signal shapes.
+    `row` needs score_prix_valorisation/score_technique/score_fondamental_reel/
+    score_global/confiance/explication/ticker (sqlite3.Row or dict, same
+    shape as opportunites). `graph`/`relations` come from
+    graph.build_graph.load_relations/build_graph (a caller-supplied cache is
+    fine -- this function does no I/O for them itself)."""
+    closes = load_price_series(conn, row["ticker"])
+    volatility = compute_volatility(closes) if closes else None
+    conflict = has_conflict(
+        row["score_prix_valorisation"], row["score_technique"], row["score_fondamental_reel"]
+    )
+    risk = compute_risk(volatility, row["confiance"], conflict)
+    watch = companies_to_watch(graph, relations, row["ticker"])
+    nom_affiche = load_display_name(conn, row["ticker"])
+
+    return {
+        "ticker": row["ticker"],
+        "nom_affiche": nom_affiche,
+        "score_global": row["score_global"],
+        "confiance": row["confiance"],
+        "score_ajuste": compute_adjusted_score(row["score_global"], row["confiance"]),
+        "score_prix_valorisation": row["score_prix_valorisation"],
+        "score_technique": row["score_technique"],
+        "score_news": row["score_news"],
+        "score_fondamental_reel": row["score_fondamental_reel"],
+        "explication": row["explication"],
+        "risque": risk,
+        "conflit_composantes": conflict,
+        "volatilite": volatility,
+        "horizon": HORIZON_LABEL,
+        "entreprises_a_surveiller": watch,
+    }
 
 
 # --- CLI ---------------------------------------------------------------------

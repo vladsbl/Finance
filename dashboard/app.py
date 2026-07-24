@@ -21,6 +21,7 @@ import html
 import os
 import sqlite3
 import sys
+from datetime import date
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -33,10 +34,13 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from analysis.combined_score import compute_rsi, proxy_rsi  # noqa: E402
+from analysis.price_valuation_scores_universe import compute_volatility  # noqa: E402
 from dashboard.currency import CURRENCY_SYMBOLS, format_amount, get_rate_to_eur  # noqa: E402
 from dashboard.glossaire import GLOSSAIRE, highlight_terms, term_span  # noqa: E402
 from reasoning.daily_summary import (  # noqa: E402
-    MIN_CONFIDENCE, add_argued_texts, build_daily_summary, staleness_note,
+    MIN_CONFIDENCE, TICKER_ANALYSIS_DAILY_LIMIT, USAGE_TABLE_TICKER_ANALYSIS,
+    add_argued_texts, build_daily_summary, build_signal,
+    load_cached_argument, load_opportunite_for_ticker, staleness_note,
 )
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
@@ -186,6 +190,117 @@ def load_exchange_rate(currency):
         conn.close()
 
 
+# --- Full-universe per-ticker detail ("Analyse d'une action") --------------
+#
+# `stocks`/`load_data()` above stay pilot-only (10 tickers) -- they still
+# back "Vue d'ensemble"'s legacy Top 10 + stats. "Analyse d'une action" reads
+# ANY universe ticker instead, computing everything from price_history +
+# final_scores + fundamental_real_scores directly so it never depends on the
+# pilot-only `stocks` snapshot table.
+
+LATEST_TICKER_SCORES_SQL = """
+SELECT price_valuation_score, technical_score, volatility_score, volume_score,
+       final_score, confidence
+FROM final_scores WHERE symbol = ? ORDER BY id DESC LIMIT 1;
+"""
+
+LATEST_TICKER_FUNDAMENTAL_SQL = """
+SELECT score_global FROM fundamental_real_scores
+WHERE symbol = ? ORDER BY id DESC LIMIT 1;
+"""
+
+TICKER_PRICE_HISTORY_SQL = """
+SELECT date, close, volume FROM price_history
+WHERE ticker = ? AND close IS NOT NULL ORDER BY date;
+"""
+
+
+@st.cache_data(show_spinner=False)
+def load_universe_ticker_list():
+    """All tracked tickers, sorted -- the full universe (~1900), not just
+    the 10 legacy pilots."""
+    if not os.path.exists(DB_PATH):
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute("SELECT ticker FROM universe ORDER BY ticker").fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+@st.cache_data(show_spinner=False)
+def load_ticker_detail(ticker):
+    """Best-effort detail for ANY universe ticker. Each pillar (price/
+    valuation, technical, fundamental-real, legacy volatility/volume/final
+    scores) is independently None if that pillar hasn't been computed for
+    this ticker -- callers must display "N/A" per missing piece, same
+    graceful-degradation convention as the rest of the app, never raise.
+    Returns None only if the ticker isn't in `universe` at all."""
+    if not os.path.exists(DB_PATH):
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        u = conn.execute(
+            "SELECT nom, devise, priorite, nom_entreprise FROM universe WHERE ticker = ?",
+            (ticker,),
+        ).fetchone()
+        if u is None:
+            return None
+        nom, devise, priorite, nom_entreprise = u
+        nom_affiche = (nom_entreprise if nom_entreprise and nom_entreprise != ticker
+                       else (nom or ticker))
+
+        final_row = conn.execute(LATEST_TICKER_SCORES_SQL, (ticker,)).fetchone()
+        (price_valuation_score, technical_score, volatility_score,
+         volume_score, final_score, confidence) = final_row or (None,) * 6
+
+        fund_row = conn.execute(LATEST_TICKER_FUNDAMENTAL_SQL, (ticker,)).fetchone()
+        score_fondamental_reel = fund_row[0] if fund_row else None
+
+        hist_rows = conn.execute(TICKER_PRICE_HISTORY_SQL, (ticker,)).fetchall()
+    finally:
+        conn.close()
+
+    history_df = pd.DataFrame(hist_rows, columns=["date", "close", "volume"])
+    current_price = ma_50 = ma_200 = volatility = last_volume = rsi = None
+    rsi_is_real = False
+    if not history_df.empty:
+        closes = history_df["close"].tolist()
+        current_price = closes[-1]
+        ma_50_last = pd.Series(closes).rolling(50).mean().iloc[-1]
+        ma_200_last = pd.Series(closes).rolling(200).mean().iloc[-1]
+        ma_50 = float(ma_50_last) if pd.notna(ma_50_last) else None
+        ma_200 = float(ma_200_last) if pd.notna(ma_200_last) else None
+        volatility = compute_volatility(closes)
+        last_volume = history_df["volume"].iloc[-1]
+
+        real_rsi = compute_rsi(closes)
+        if real_rsi is not None:
+            rsi, rsi_is_real = real_rsi, True
+        elif ma_50 is not None and ma_200 is not None:
+            rsi, rsi_is_real = proxy_rsi(current_price, ma_50, ma_200), False
+
+    return {
+        "ticker": ticker, "nom_affiche": nom_affiche, "devise": devise or "USD",
+        "priorite": priorite,
+        "current_price": current_price, "ma_50": ma_50, "ma_200": ma_200,
+        "volume": last_volume, "volatility": volatility,
+        "rsi": rsi, "rsi_is_real": rsi_is_real,
+        "price_valuation_score": price_valuation_score,
+        "technical_score": technical_score,
+        "volatility_score": volatility_score,
+        "volume_score": volume_score,
+        "final_score": final_score,
+        "confidence": confidence,
+        "score_fondamental_reel": score_fondamental_reel,
+        "history": (history_df[["date", "close"]] if not history_df.empty
+                   else pd.DataFrame(columns=["date", "close"])),
+    }
+
+
 # --- UI helpers ------------------------------------------------------------
 
 def score_color(value):
@@ -231,63 +346,83 @@ def render_top10(df):
     st.caption("Green: score > 60 · Orange: 40-60 · Red: < 40")
 
 
-def render_detail(df):
+def render_detail():
+    """Ticker picker + top-line metrics for ANY universe ticker (not just
+    the 10 legacy pilots -- see load_ticker_detail). Returns the selected
+    symbol, or None if `universe` is empty."""
     st.subheader("Detail d'une action")
 
-    symbols = df["symbol"].tolist()
-    symbol = st.selectbox("Select a stock", symbols, key="detail_symbol")
-    row = df[df["symbol"] == symbol].iloc[0]
+    tickers = load_universe_ticker_list()
+    if not tickers:
+        st.error("Aucun ticker dans `universe`. Lance `python universe/build_universe.py`.")
+        return None
+
+    names_by_ticker = load_universe_names()
+    symbol = st.selectbox(
+        "Select a stock", tickers, key="detail_symbol",
+        format_func=lambda t: f"{t} - {names_by_ticker.get(t, t)}"
+                              if names_by_ticker.get(t, t) != t else t,
+    )
+    detail = load_ticker_detail(symbol)
+    if detail is None:
+        st.error(f"{symbol} introuvable dans `universe`.")
+        return None
 
     # Display-only EUR conversion (see dashboard/currency.py): the raw price
-    # in `stocks`/price_history is never touched, only what's shown here.
-    devise = row.get("devise") or "USD"
+    # in price_history is never touched, only what's shown here.
+    devise = detail["devise"]
     rate = load_exchange_rate(devise)
     price_help = None if devise == "EUR" else (
         f"Converti depuis {devise} (taux du jour)" if rate is not None
         else f"Taux {devise}->EUR indisponible : montant affiche en {devise} d'origine"
     )
 
+    def _fmt(value, fmt="{:.1f}"):
+        return fmt.format(value) if value is not None else "N/A"
+
     c1, c2, c3 = st.columns(3)
-    c1.metric("Current price", format_amount(row["current_price"], devise, rate),
+    c1.metric("Current price", format_amount(detail["current_price"], devise, rate),
               help=price_help)
-    c2.metric("MA 50", format_amount(row["ma_50"], devise, rate),
+    c2.metric("MA 50", format_amount(detail["ma_50"], devise, rate),
               help=GLOSSAIRE["MA 50"] + (f" {price_help}" if price_help else ""))
-    c3.metric("MA 200", format_amount(row["ma_200"], devise, rate),
+    c3.metric("MA 200", format_amount(detail["ma_200"], devise, rate),
               help=GLOSSAIRE["MA 200"] + (f" {price_help}" if price_help else ""))
 
     c4, c5, c6 = st.columns(3)
-    volume = row["volume"]
-    c4.metric("Volume", f"{int(volume):,}" if pd.notna(volume) else "N/A",
+    volume = detail["volume"]
+    c4.metric("Volume", f"{int(volume):,}" if volume is not None else "N/A",
               help=GLOSSAIRE["Volume"])
-    vol = row["volatility"]
-    c5.metric("Volatility", f"{vol:.2%}" if pd.notna(vol) else "N/A",
-              help=GLOSSAIRE["Volatility"])
-    rsi_label = f"{row['rsi']:.1f}" + ("" if row["rsi_is_real"] else " (proxy)")
+    c5.metric("Volatility", _fmt(detail["volatility"], "{:.2%}"), help=GLOSSAIRE["Volatility"])
+    rsi = detail["rsi"]
+    rsi_label = (_fmt(rsi) + ("" if detail["rsi_is_real"] else " (proxy)")) if rsi is not None else "N/A"
     c6.metric("RSI (14)", rsi_label, help=GLOSSAIRE["RSI"])
 
     st.markdown("**Scores**")
     s1, s2, s3 = st.columns(3)
-    s1.metric("Prix/Valorisation", f"{row['price_valuation_score']:.1f}",
+    s1.metric("Prix/Valorisation", _fmt(detail["price_valuation_score"]),
               help=GLOSSAIRE["Prix/Valorisation"])
-    s2.metric("Technical", f"{row['technical_score']:.1f}", help=GLOSSAIRE["Technical"])
-    s3.metric("Volatility score", f"{row['volatility_score']:.1f}",
-              help=GLOSSAIRE["Volatility"])
+    s2.metric("Technical", _fmt(detail["technical_score"]), help=GLOSSAIRE["Technical"])
+    s3.metric("Fondamental reel", _fmt(detail["score_fondamental_reel"]),
+              help=GLOSSAIRE["Fondamental reel"])
     s4, s5, s6 = st.columns(3)
-    s4.metric("Volume score", f"{row['volume_score']:.1f}", help=GLOSSAIRE["Volume"])
-    s5.metric("Final score", f"{row['final_score']:.1f}", help=GLOSSAIRE["Final score"])
-    s6.metric("Confidence", f"{row['confidence']:.0f}%", help=GLOSSAIRE["Confidence"])
+    s4.metric("Volatility score", _fmt(detail["volatility_score"]), help=GLOSSAIRE["Volatility"])
+    s5.metric("Volume score", _fmt(detail["volume_score"]), help=GLOSSAIRE["Volume"])
+    confidence = detail["confidence"]
+    s6.metric("Confidence", _fmt(confidence, "{:.0f}%"), help=GLOSSAIRE["Confidence"])
 
     return symbol
 
 
-def render_chart(df, history, symbol):
+def render_chart(symbol):
     st.subheader("Prix & moyennes mobiles")
-    prices = history.get(symbol, pd.DataFrame())
+    detail = load_ticker_detail(symbol)
+    prices = detail["history"] if detail else pd.DataFrame()
 
     if prices.empty:
         st.info(
-            "No price history for this stock yet. "
-            "Run `python ingestion/ingest_prices.py` to populate `price_history`."
+            "No price history for this stock yet. Run "
+            f"`python ingestion/ingest_universe_prices.py --tickers {symbol}` "
+            "to populate `price_history`."
         )
         return
 
@@ -302,8 +437,7 @@ def render_chart(df, history, symbol):
     # Display-only EUR conversion (see dashboard/currency.py): applied to the
     # whole series at once (vectorised multiply), not per data point. The
     # underlying price_history table is never touched.
-    devise_rows = df.loc[df["symbol"] == symbol, "devise"]
-    devise = devise_rows.iloc[0] if not devise_rows.empty else "USD"
+    devise = detail["devise"]
     if devise == "EUR":
         price_unit = "€"
     else:
@@ -338,6 +472,90 @@ def render_chart(df, history, symbol):
         hovermode="x unified",
     )
     st.plotly_chart(fig, use_container_width=True)
+
+
+def _entreprises_a_surveiller_block(surveiller):
+    st.markdown(term_span("Entreprises a surveiller", "Entreprises a surveiller"),
+                unsafe_allow_html=True)
+    for rtype, names in surveiller.items():
+        st.markdown(f"- **{rtype}** : {', '.join(names)}")
+
+
+def render_ai_analysis_section(symbol):
+    """On-demand Groq-argued text for ANY ticker on this page -- generalises
+    reasoning/daily_summary.py's Resume-du-jour mechanism (same build_signal,
+    same add_argued_texts call) beyond just the daily top-3 signals, but
+    draws from its OWN daily quota pool (USAGE_TABLE_TICKER_ANALYSIS,
+    TICKER_ANALYSIS_DAILY_LIMIT=10/day) instead of Resume du jour's
+    (DAILY_LLM_CALL_LIMIT=3/day) -- browsing dozens of tickers/day here can
+    never exhaust, or be exhausted by, Resume du jour's own budget. Both
+    still share the same daily_summary_arguments cache table/key, so a
+    ticker generated via either entry point is reused for free by the
+    other. Never calls Groq on page load: the cache (today, ticker) is
+    checked FIRST, and Groq is only ever reached via an explicit button
+    click."""
+    st.subheader("Analyse argumentee (IA)")
+
+    if not os.path.exists(DB_PATH):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        opp_row = load_opportunite_for_ticker(conn, symbol)
+        if opp_row is None:
+            st.info(
+                "Pas de donnees d'opportunite pour ce ticker (score global, "
+                "technique, fondamental, news). Lance "
+                "`python reasoning/opportunity_scoring.py --priorite toutes` "
+                "pour l'inclure."
+            )
+            return
+
+        relations = load_relations()
+        graph = build_graph(relations)
+        signal = build_signal(conn, opp_row, graph, relations)
+
+        today = date.today().isoformat()
+        cached = load_cached_argument(conn, today, symbol)
+
+        if cached:
+            st.markdown(f"##### {highlight_terms(cached)}", unsafe_allow_html=True)
+        else:
+            st.caption("Analyse IA pas encore generee pour ce ticker aujourd'hui.")
+            if st.button("Generer l'analyse", key=f"gen_ai_{symbol}"):
+                with st.spinner("Generation en cours (Groq)..."):
+                    add_argued_texts(conn, [signal], usage_table=USAGE_TABLE_TICKER_ANALYSIS,
+                                      call_limit=TICKER_ANALYSIS_DAILY_LIMIT)
+                if signal.get("texte_argumente"):
+                    st.markdown(f"##### {highlight_terms(signal['texte_argumente'])}",
+                                unsafe_allow_html=True)
+                else:
+                    st.warning(
+                        "Generation indisponible pour l'instant (quota Groq du jour "
+                        "atteint, cle API absente, ou erreur reseau) -- voir le detail "
+                        "structure ci-dessous."
+                    )
+
+        with st.expander("Detail des composantes (donnees structurees)"):
+            c1, c2 = st.columns(2)
+            c1.metric("Score ajuste", f"{signal['score_ajuste']:.1f}",
+                      help=GLOSSAIRE["Score ajuste"])
+            c2.metric("Confiance", f"{signal['confiance']:.0f}%", help=GLOSSAIRE["Confiance"])
+            st.markdown(highlight_terms(signal["explication"]), unsafe_allow_html=True)
+            risk_tip = html.escape(GLOSSAIRE["Risque"], quote=True)
+            conflict_note = (" - composantes structurelles en contradiction"
+                             if signal["conflit_composantes"] else "")
+            st.markdown(
+                f"<span style='cursor:help;border-bottom:1px dotted #6b7280;' "
+                f"title=\"{risk_tip}\">Risque : {signal['risque']}</span>"
+                f"<span style='font-size:0.85em;color:gray;'>{conflict_note}</span>",
+                unsafe_allow_html=True,
+            )
+            if signal["volatilite"] is not None:
+                st.caption(f"Volatilite annualisee : {signal['volatilite']:.0%}")
+            if signal["entreprises_a_surveiller"]:
+                _entreprises_a_surveiller_block(signal["entreprises_a_surveiller"])
+    finally:
+        conn.close()
 
 
 def render_stats(df):
@@ -839,12 +1057,6 @@ def render_daily_summary_page():
             )
             st.caption(s["horizon"])
 
-            def _entreprises_a_surveiller_block(surveiller):
-                st.markdown(term_span("Entreprises a surveiller", "Entreprises a surveiller"),
-                            unsafe_allow_html=True)
-                for rtype, names in surveiller.items():
-                    st.markdown(f"- **{rtype}** : {', '.join(names)}")
-
             if s.get("texte_argumente"):
                 with st.expander("Detail des composantes (donnees structurees)"):
                     st.markdown(highlight_terms(s["explication"]), unsafe_allow_html=True)
@@ -885,11 +1097,15 @@ def page_overview():
 
 
 def page_stock():
-    """Per-stock detail + price/MA chart."""
-    df, history = _get_scored_data()
-    symbol = render_detail(df)
+    """Per-stock detail + price/MA chart + on-demand AI analysis -- covers
+    the full universe (~1900 tickers), not just the 10 legacy pilots."""
+    symbol = render_detail()
+    if symbol is None:
+        return
     st.divider()
-    render_chart(df, history, symbol)
+    render_chart(symbol)
+    st.divider()
+    render_ai_analysis_section(symbol)
 
 
 def page_news():
