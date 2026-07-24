@@ -532,11 +532,26 @@ def render_graph_page():
         )
         return
 
-    graph = build_graph(relations)
+    # "Primary" (highlighted) nodes reflect TODAY's best opportunites --
+    # not a fixed 10-pilot-ticker list -- so the graph's emphasis moves with
+    # the data instead of always spotlighting the same tickers. Reuses
+    # load_opportunites(), already resolved to the latest available
+    # date_calcul (see reasoning/daily_summary.py's resolve_data_date for
+    # the same freshness reasoning), ranked by score_global desc.
+    opp_df, _ = load_opportunites()
+    top_tickers = list(opp_df["ticker"].head(10)) if not opp_df.empty else []
+
+    graph = build_graph(relations, tracked=set(top_tickers))
     n_primary = sum(1 for _, d in graph.nodes(data=True) if d["kind"] == "primary")
     n_external = graph.number_of_nodes() - n_primary
     st.caption(f"{graph.number_of_nodes()} noeuds ({n_primary} suivis, "
                f"{n_external} externes) - {graph.number_of_edges()} relations")
+    if top_tickers:
+        data_date = opp_df["date_calcul"].iloc[0]
+        st.caption(
+            f"Noeuds mis en avant = top 10 opportunites du {data_date} : "
+            + ", ".join(top_tickers)
+        )
 
     try:
         import streamlit.components.v1 as components
@@ -549,8 +564,16 @@ def render_graph_page():
     st.markdown("**Relations directes par ticker**")
     tickers = sorted({r["source_ticker"].strip() for r in relations})
     names_by_ticker = load_universe_names()
+    # Default the picker to today's #1 opportunite if it actually has
+    # relations data; otherwise fall back to the first ticker alphabetically
+    # (Streamlit's own default) rather than forcing a choice with no data.
+    default_index = 0
+    for t in top_tickers:
+        if t in tickers:
+            default_index = tickers.index(t)
+            break
     ticker = st.selectbox(
-        "Ticker", tickers, key="graph_ticker",
+        "Ticker", tickers, key="graph_ticker", index=default_index,
         format_func=lambda t: f"{t} - {names_by_ticker.get(t, t)}"
                               if names_by_ticker.get(t, t) != t else t,
     )
