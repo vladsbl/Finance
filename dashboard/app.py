@@ -35,7 +35,7 @@ if REPO_ROOT not in sys.path:
 from analysis.combined_score import compute_rsi, proxy_rsi  # noqa: E402
 from dashboard.glossaire import GLOSSAIRE, highlight_terms, term_span  # noqa: E402
 from reasoning.daily_summary import (  # noqa: E402
-    MIN_CONFIDENCE, add_argued_texts, build_daily_summary,
+    MIN_CONFIDENCE, add_argued_texts, build_daily_summary, staleness_note,
 )
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
@@ -676,6 +676,9 @@ def render_daily_summary_page():
         f"{today} - {len(signals)} signal(aux) retenu(s) sur {n_candidates} "
         f"candidat(s) eligible(s) (confiance >= {MIN_CONFIDENCE:.0f}%)"
     )
+    note = staleness_note(today)
+    if note:
+        st.warning(note)
 
     if not signals:
         st.warning(

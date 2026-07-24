@@ -9,8 +9,15 @@ next week or next month.
 
 Selection logic
 ----------------
-Candidates come from today's rows in `opportunites` (date_calcul = today).
-Ranking uses an ADJUSTED score, not the raw score_global, because a high raw
+Candidates come from the LATEST date_calcul actually present in
+`opportunites` (see resolve_data_date) -- not necessarily today's calendar
+date. `opportunites` is only as fresh as the last
+reasoning/opportunity_scoring.py run; filtering strictly on date.today()
+used to silently return zero candidates whenever a day was skipped, even
+though a fully-computed snapshot existed. The date actually used is always
+returned alongside the signals and must be surfaced by callers (see
+staleness_note) so stale data is visible, never silent. Ranking uses an
+ADJUSTED score, not the raw score_global, because a high raw
 score built on a single, unverified signal should never outrank a lower but
 well-supported one:
 
@@ -172,12 +179,58 @@ def compute_risk(volatility, confiance, conflict):
 
 # --- Data access -----------------------------------------------------------
 
-def load_today_opportunites(conn, today):
+def load_opportunites_for_date(conn, data_date):
+    """opportunites rows for one exact date_calcul (with a real score).
+    Renamed from load_today_opportunites: the date passed in is not
+    necessarily today's calendar date (see resolve_data_date) -- the old
+    name implied a literalness that no longer holds."""
     conn.row_factory = sqlite3.Row
     return conn.execute(
         "SELECT * FROM opportunites WHERE date_calcul = ? AND score_global IS NOT NULL",
-        (today,),
+        (data_date,),
     ).fetchall()
+
+
+def resolve_data_date(conn, explicit_date):
+    """The date_calcul to actually use: `explicit_date` if given (e.g. the
+    CLI's --date override, for testing a specific past snapshot), otherwise
+    the LATEST date_calcul actually present in `opportunites` -- which is
+    not necessarily today's calendar date. `opportunites` is only as fresh
+    as the last time reasoning/opportunity_scoring.py was run; filtering
+    strictly on date.today() silently returns zero rows (and a misleading
+    "0 candidates" message that reads as "nothing interesting today" rather
+    than "the pipeline hasn't run in N days") whenever a day was skipped,
+    even though a fully-computed snapshot is sitting right there. Mirrors
+    dashboard/app.py's OPPORTUNITES_SQL, which already resolves the same way
+    -- this fixes the two pages disagreeing about which tickers exist."""
+    if explicit_date:
+        return explicit_date
+    row = conn.execute("SELECT MAX(date_calcul) FROM opportunites").fetchone()
+    return row[0] if row else None
+
+
+def data_age_days(data_date):
+    """Whole calendar days between `data_date` (a YYYY-MM-DD date_calcul) and
+    today. None if data_date is falsy or unparsable (nothing to compare)."""
+    if not data_date:
+        return None
+    try:
+        d = date.fromisoformat(data_date)
+    except ValueError:
+        return None
+    return (date.today() - d).days
+
+
+def staleness_note(data_date):
+    """Human-readable staleness warning, or None when the data is from today
+    (age 0) or unavailable. Surfaced in both the CLI (print_summary) and the
+    dashboard so a stale `opportunites` snapshot -- e.g. the daily pipeline
+    run was skipped -- is immediately visible instead of silent."""
+    age = data_age_days(data_date)
+    if not age:
+        return None
+    day_word = "jour" if age == 1 else "jours"
+    return f"Donnees du {data_date}, non recalculees depuis {age} {day_word}."
 
 
 def load_price_series(conn, ticker):
@@ -378,6 +431,11 @@ def add_argued_texts(conn, signals):
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return
 
+    # Deliberately the real calendar day, NOT build_daily_summary()'s
+    # data_date: this is a rate-limit/cache window against actual wall-clock
+    # days (the Groq quota resets daily regardless of how stale opportunites
+    # happens to be), so it must stay tied to date.today() even when the
+    # signals themselves come from an older snapshot.
     today_real = date.today().isoformat()
 
     try:
@@ -445,11 +503,18 @@ def add_argued_texts(conn, signals):
 # --- Orchestration ---------------------------------------------------------
 
 def build_daily_summary(conn, today=None):
-    """Return (signals, today, n_candidates). ``signals`` has at most TOP_N
-    entries, fewer if not enough tickers clear MIN_CONFIDENCE."""
-    today = today or date.today().isoformat()
+    """Return (signals, data_date, n_candidates). ``signals`` has at most
+    TOP_N entries, fewer if not enough tickers clear MIN_CONFIDENCE.
+    ``data_date`` is the date_calcul actually used -- the latest one
+    available in `opportunites` unless `today` explicitly overrides it (see
+    resolve_data_date) -- and is not necessarily today's calendar date;
+    callers must surface it (and ideally staleness_note(data_date)) so stale
+    data is visible, never silent."""
+    data_date = resolve_data_date(conn, today)
+    if data_date is None:
+        return [], None, 0
 
-    rows = load_today_opportunites(conn, today)
+    rows = load_opportunites_for_date(conn, data_date)
     eligible = [r for r in rows if r["confiance"] is not None and r["confiance"] >= MIN_CONFIDENCE]
 
     ranked = sorted(
@@ -491,7 +556,7 @@ def build_daily_summary(conn, today=None):
             "entreprises_a_surveiller": watch,
         })
 
-    return signals, today, len(eligible)
+    return signals, data_date, len(eligible)
 
 
 # --- CLI ---------------------------------------------------------------------
@@ -509,6 +574,9 @@ def _fmt_pct(value):
 def print_summary(signals, today, n_candidates):
     print("\n" + "=" * 78)
     print(f"RESUME DU JOUR - {today}")
+    note = staleness_note(today)
+    if note:
+        print(f"[!] {note}")
     print("=" * 78)
     if not signals:
         print(f"Aucun signal ne depasse le seuil de confiance minimal "
