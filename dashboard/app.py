@@ -33,6 +33,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from analysis.combined_score import compute_rsi, proxy_rsi  # noqa: E402
+from dashboard.currency import CURRENCY_SYMBOLS, format_amount, get_rate_to_eur  # noqa: E402
 from dashboard.glossaire import GLOSSAIRE, highlight_terms, term_span  # noqa: E402
 from reasoning.daily_summary import (  # noqa: E402
     MIN_CONFIDENCE, add_argued_texts, build_daily_summary, staleness_note,
@@ -74,10 +75,12 @@ def inject_style():
 # --- Data access -----------------------------------------------------------
 
 LATEST_STOCKS_SQL = """
-SELECT s.symbol, s.current_price, s.ma_50, s.ma_200, s.volume, s.volatility
+SELECT s.symbol, s.current_price, s.ma_50, s.ma_200, s.volume, s.volatility,
+       COALESCE(u.devise, 'USD') AS devise
 FROM stocks s
 JOIN (SELECT symbol, MAX(id) AS max_id FROM stocks GROUP BY symbol) l
-  ON s.id = l.max_id;
+  ON s.id = l.max_id
+LEFT JOIN universe u ON u.ticker = s.symbol;
 """
 
 LATEST_FINAL_SQL = """
@@ -166,6 +169,23 @@ def load_data():
     return df, history, None
 
 
+@st.cache_data(show_spinner=False)
+def load_exchange_rate(currency):
+    """EUR conversion rate for `currency`, cached once per calendar day (see
+    dashboard/currency.py's own exchange_rates cache) AND once per
+    Streamlit session (st.cache_data) so a page rerun never hits the
+    database, let alone the network, for a rate already fetched today.
+    Returns None if unavailable -- callers must fall back to the native
+    currency (see dashboard/currency.format_amount), never guess a rate."""
+    if not os.path.exists(DB_PATH):
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        return get_rate_to_eur(conn, currency)
+    finally:
+        conn.close()
+
+
 # --- UI helpers ------------------------------------------------------------
 
 def score_color(value):
@@ -218,10 +238,22 @@ def render_detail(df):
     symbol = st.selectbox("Select a stock", symbols, key="detail_symbol")
     row = df[df["symbol"] == symbol].iloc[0]
 
+    # Display-only EUR conversion (see dashboard/currency.py): the raw price
+    # in `stocks`/price_history is never touched, only what's shown here.
+    devise = row.get("devise") or "USD"
+    rate = load_exchange_rate(devise)
+    price_help = None if devise == "EUR" else (
+        f"Converti depuis {devise} (taux du jour)" if rate is not None
+        else f"Taux {devise}->EUR indisponible : montant affiche en {devise} d'origine"
+    )
+
     c1, c2, c3 = st.columns(3)
-    c1.metric("Current price", f"${row['current_price']:.2f}")
-    c2.metric("MA 50", f"${row['ma_50']:.2f}", help=GLOSSAIRE["MA 50"])
-    c3.metric("MA 200", f"${row['ma_200']:.2f}", help=GLOSSAIRE["MA 200"])
+    c1.metric("Current price", format_amount(row["current_price"], devise, rate),
+              help=price_help)
+    c2.metric("MA 50", format_amount(row["ma_50"], devise, rate),
+              help=GLOSSAIRE["MA 50"] + (f" {price_help}" if price_help else ""))
+    c3.metric("MA 200", format_amount(row["ma_200"], devise, rate),
+              help=GLOSSAIRE["MA 200"] + (f" {price_help}" if price_help else ""))
 
     c4, c5, c6 = st.columns(3)
     volume = row["volume"]
@@ -267,6 +299,21 @@ def render_chart(df, history, symbol):
     prices["ma_50"] = prices["close"].rolling(50).mean()
     prices["ma_200"] = prices["close"].rolling(200).mean()
 
+    # Display-only EUR conversion (see dashboard/currency.py): applied to the
+    # whole series at once (vectorised multiply), not per data point. The
+    # underlying price_history table is never touched.
+    devise_rows = df.loc[df["symbol"] == symbol, "devise"]
+    devise = devise_rows.iloc[0] if not devise_rows.empty else "USD"
+    if devise == "EUR":
+        price_unit = "€"
+    else:
+        rate = load_exchange_rate(devise)
+        if rate is not None:
+            prices[["close", "ma_50", "ma_200"]] *= rate
+            price_unit = "€"
+        else:
+            price_unit = CURRENCY_SYMBOLS.get(devise, devise)
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=prices["date"], y=prices["close"],
@@ -282,7 +329,7 @@ def render_chart(df, history, symbol):
     ))
     fig.update_layout(
         title=f"{symbol} - price vs moving averages ({len(prices)} trading days)",
-        xaxis_title="Date", yaxis_title="Price ($)",
+        xaxis_title="Date", yaxis_title=f"Price ({price_unit})",
         height=470, margin=dict(t=50, b=70),
         # Legend below the plot (not above, alongside the title) -- the
         # previous y=1.02/x=0 placement shared the same top-left corner as
