@@ -319,16 +319,38 @@ CREATE TABLE IF NOT EXISTS daily_summary_arguments (
 """
 
 SYSTEM_PROMPT_ARGUMENT = (
-    "Tu es un analyste financier qui redige un court paragraphe en francais "
-    "pour expliquer POURQUOI un signal d'investissement merite l'attention "
-    "AUJOURD'HUI. Regle absolue : reste strictement fidele aux donnees "
-    "fournies -- n'invente aucun fait, aucun chiffre, aucune information qui "
-    "n'y figure pas explicitement. Appuie-toi uniquement sur les scores, les "
-    "explications, le niveau de risque et les entreprises liees fournis. "
-    "Style : clair, concis, professionnel, 3 a 5 phrases. N'enumere pas "
-    "mecaniquement les chiffres deja donnes : explique ce qu'ils signifient "
-    "pour un investisseur. Reponds uniquement avec le paragraphe, sans titre "
-    "ni introduction ni markdown."
+    "Tu es un analyste financier qui redige une analyse structuree en "
+    "francais pour expliquer POURQUOI un signal d'investissement merite "
+    "l'attention AUJOURD'HUI. Le lecteur n'est pas trader professionnel : "
+    "reste accessible, sans jargon non explique.\n\n"
+    "Regle absolue : reste strictement fidele aux donnees fournies -- "
+    "n'invente aucun fait, aucun chiffre, et surtout aucun contexte "
+    "macro-economique (taux d'interet, tensions geopolitiques, matieres "
+    "premieres, decisions de banque centrale) qui n'apparaisse pas "
+    "explicitement ci-dessous. Si aucun contexte macro/causal/news n'est "
+    "fourni, n'en mentionne aucun -- dis-toi que ce ticker n'a simplement "
+    "pas d'actualite macro notable en ce moment, ce n'est pas une lacune a "
+    "combler par toi-meme.\n\n"
+    "Structure attendue, en 3 paragraphes distincts separes par un saut de "
+    "ligne. Longueur IMPERATIVE : 180 mots au total maximum (60 mots par "
+    "paragraphe environ) -- sois dense et va a l'essentiel, ne developpe "
+    "pas au-dela :\n"
+    "1. Situation de l'entreprise : ce que les scores fournis (prix/"
+    "valorisation, technique, fondamental reel, risque) signifient "
+    "concretement pour quelqu'un qui envisage d'investir -- pas une "
+    "enumeration mecanique des chiffres, explique ce qu'ils impliquent.\n"
+    "2. Contexte macro-economique ou sectoriel -- UNIQUEMENT si une chaine "
+    "causale ou une news importante est fournie ci-dessous ; sinon, limite "
+    "ce paragraphe aux entreprises liees deja fournies (concurrents/"
+    "fournisseurs/clients), sans inventer de contexte macro absent.\n"
+    "3. Synthese : en quoi la combinaison de la situation propre a "
+    "l'entreprise et du contexte (macro s'il existe, sinon sectoriel/"
+    "concurrentiel) rend -- ou ne rend pas clairement -- cette action "
+    "interessante AUJOURD'HUI specifiquement, pas de maniere generale.\n\n"
+    "Style : phrases completes, ton professionnel mais clair, sans "
+    "markdown ni titres de section visibles (les 3 paragraphes suffisent a "
+    "structurer). Reponds uniquement avec le texte de l'analyse, rien "
+    "d'autre."
 )
 
 
@@ -380,7 +402,69 @@ def save_argument(conn, day, ticker, texte):
     conn.commit()
 
 
-def build_argument_prompt(signal):
+# Same importance bar as reasoning/causal_reasoning.py's own trigger
+# threshold (IMPORTANCE_THRESHOLD) -- a news item below this bar is routine,
+# not the kind of thing worth surfacing as "macro context" in an argued text.
+MACRO_NEWS_IMPORTANCE_THRESHOLD = 8
+
+
+def load_macro_context(conn, ticker):
+    """Real, pipeline-grounded macro/causal context for `ticker`, or None if
+    nothing exists. This is the ONLY source build_argument_prompt() is
+    allowed to draw a macro-economic angle from -- the prompt explicitly
+    forbids inventing one, so a ticker with no real signal here simply gets
+    no macro paragraph, never a fabricated one.
+
+    Checked in priority order:
+      1. The most recent causal reasoning chain for this ticker
+         (reasoning/causal_reasoning.py, causal_chains.ticker_source) -- a
+         chain is inherently macro-adjacent (it traces indirect
+         consequences through the Knowledge Graph), so it outranks a bare
+         news item when both exist.
+      2. The most recent high-importance news analysed for this ticker
+         (news_analysis.importance >= MACRO_NEWS_IMPORTANCE_THRESHOLD,
+         joined to news_raw for the ticker match) -- same bar
+         causal_reasoning.py itself uses to decide a news item is worth
+         reasoning about at all.
+    Both mechanisms run on their own limited Groq quotas, so most tickers
+    on most days will legitimately have neither -- that is expected, not a
+    gap to fill."""
+    row = conn.execute(
+        "SELECT chaine_raisonnement, confiance, created_at FROM causal_chains "
+        "WHERE ticker_source = ? ORDER BY created_at DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    if row:
+        chaine, confiance, created_at = row
+        return {
+            "type": "chaine_causale",
+            "texte": chaine,
+            "confiance": confiance,
+            "date": (created_at or "")[:10],
+        }
+
+    row = conn.execute(
+        "SELECT r.title, a.sector, a.impact, a.tonalite, a.importance, a.created_at "
+        "FROM news_analysis a JOIN news_raw r ON r.id = a.news_id "
+        "WHERE r.ticker = ? AND a.importance >= ? "
+        "ORDER BY a.created_at DESC LIMIT 1",
+        (ticker, MACRO_NEWS_IMPORTANCE_THRESHOLD),
+    ).fetchone()
+    if row:
+        title, sector, impact, tonalite, importance, created_at = row
+        return {
+            "type": "news_importante",
+            "titre": title,
+            "secteur": sector,
+            "impact": impact,
+            "tonalite": tonalite,
+            "importance": importance,
+            "date": (created_at or "")[:10],
+        }
+    return None
+
+
+def build_argument_prompt(signal, macro_context=None):
     lines = [
         f"Entreprise : {signal['nom_affiche']} ({signal['ticker']})",
         f"Score global : {signal['score_global']:.1f}/100 "
@@ -399,31 +483,58 @@ def build_argument_prompt(signal):
     if watch:
         parts = [f"{rtype}: {', '.join(names)}" for rtype, names in watch.items()]
         lines.append("Entreprises liees (graphe de connaissances) : " + " | ".join(parts))
+
+    if macro_context is None:
+        lines.append(
+            "\nAucun contexte macro-economique ou causal recent disponible "
+            "pour ce ticker dans le pipeline -- n'en invente aucun, "
+            "limite-toi au contexte sectoriel/concurrentiel deja fourni "
+            "ci-dessus si besoin."
+        )
+    elif macro_context["type"] == "chaine_causale":
+        lines.append(
+            f"\nContexte causal disponible (chaine de raisonnement generee "
+            f"le {macro_context['date']}, confiance {macro_context['confiance']:.0f}%) "
+            f"-- utilise-la comme contexte macro/sectoriel reel, ne la "
+            f"reformule pas mot pour mot :\n{macro_context['texte']}"
+        )
+    else:
+        lines.append(
+            f"\nNews importante recente disponible ({macro_context['date']}, "
+            f"importance {macro_context['importance']}/10, tonalite "
+            f"{macro_context['tonalite']}) -- utilise-la comme contexte macro/"
+            f"sectoriel reel :\n"
+            f"Titre : {macro_context['titre']}\n"
+            f"Secteur concerne : {macro_context['secteur'] or 'non precise'}\n"
+            f"Impact identifie : {macro_context['impact']}"
+        )
+
     lines.append(
-        "Redige le paragraphe explicatif demande, uniquement a partir des "
-        "elements ci-dessus."
+        "\nRedige l'analyse structuree en 3 paragraphes demandee, "
+        "uniquement a partir des elements ci-dessus."
     )
     return "\n".join(lines)
 
 
-def generate_argued_text(client, signal):
+def generate_argued_text(client, conn, signal):
+    macro_context = load_macro_context(conn, signal["ticker"])
     completion = client.chat.completions.create(
         model=GROQ_MODEL,
         temperature=0.4,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT_ARGUMENT},
-            {"role": "user", "content": build_argument_prompt(signal)},
+            {"role": "user", "content": build_argument_prompt(signal, macro_context)},
         ],
     )
     text = completion.choices[0].message.content
     return text.strip() if text else None
 
 
-def generate_with_retry(client, signal):
+def generate_with_retry(client, conn, signal):
     """generate_argued_text with exponential backoff on 429 rate limits."""
     for attempt in range(MAX_RETRIES):
         try:
-            return generate_argued_text(client, signal)
+            return generate_argued_text(client, conn, signal)
         except Exception as exc:  # noqa: BLE001
             if _is_rate_limit(exc) and attempt < MAX_RETRIES - 1:
                 wait = BACKOFF_BASE * (2 ** attempt)
@@ -525,7 +636,7 @@ def add_argued_texts(conn, signals, usage_table=USAGE_TABLE_SUMMARY,
 
     for s in pending[:remaining]:
         try:
-            text = generate_with_retry(client, s)
+            text = generate_with_retry(client, conn, s)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "%s: generation du texte argumente echouee (%s). "
