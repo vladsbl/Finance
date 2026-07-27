@@ -1,6 +1,7 @@
 yfinance
 pandas
 numpy
+scipy
 streamlit
 plotly==6.8.0
 groq
