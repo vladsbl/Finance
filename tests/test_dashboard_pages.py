@@ -96,6 +96,42 @@ def test_page_opportunities_loads_without_error():
     assert "Opportunites du jour" in subheaders
 
 
+def _run_page_causal_reasoning():
+    import dashboard.app as app
+    app.load_causal_chains.clear()
+    app.page_causal_reasoning()
+
+
+def _run_page_causal_reasoning_zero_chains():
+    # No domain threshold to tweak here (unlike MIN_CONFIDENCE for daily
+    # summary) -- causal_chains simply has 0 rows in that scenario, so the
+    # loader itself is monkeypatched to return an empty result, exercising
+    # the real render_causal_reasoning_page() empty-state branch.
+    import dashboard.app as app
+    app.load_causal_chains = lambda limit=app.CAUSAL_CHAIN_DISPLAY_LIMIT: ([], None)
+    app.page_causal_reasoning()
+
+
+def test_page_causal_reasoning_loads_without_error():
+    """'Raisonnement causal' (module 7 dashboard page) must render cleanly."""
+    at = AppTest.from_function(_run_page_causal_reasoning, default_timeout=60).run()
+    assert not at.exception, f"page_causal_reasoning raised: {list(at.exception)}"
+    subheaders = [s.value for s in at.subheader]
+    assert "Raisonnement causal" in subheaders
+
+
+def test_page_causal_reasoning_handles_zero_chains_without_crash():
+    """When no causal chain has been generated yet (a likely state given the
+    dedicated Groq quota), the page must show a clear info message instead
+    of an empty page."""
+    at = AppTest.from_function(_run_page_causal_reasoning_zero_chains, default_timeout=60).run()
+    assert not at.exception, f"page_causal_reasoning raised: {list(at.exception)}"
+    infos = [i.value for i in at.info]
+    assert any("Aucune chaine" in i for i in infos), (
+        f"Expected a 'no chain' info message, got: {infos}"
+    )
+
+
 def test_opportunities_priority_filter_changes_row_count():
     """Regression test: the 'Priorite univers' filter must offer every real
     universe.priorite value (not just a subset seen in already-computed

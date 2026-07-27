@@ -18,6 +18,7 @@ is shown over whatever snapshot history exists. RSI is not persisted in
 """
 
 import html
+import json
 import os
 import sqlite3
 import sys
@@ -1072,6 +1073,116 @@ def render_daily_summary_page():
                     _entreprises_a_surveiller_block(s["entreprises_a_surveiller"])
 
 
+# --- Raisonnement causal (module 7) -------------------------------------------
+
+CAUSAL_CHAINS_SQL = """
+SELECT c.id, c.news_id, c.ticker_source, c.chaine_raisonnement,
+       c.entreprises_impactees, c.confiance, c.model, c.created_at,
+       r.title AS news_title
+FROM causal_chains c
+LEFT JOIN news_raw r ON r.id = c.news_id
+ORDER BY c.created_at DESC
+LIMIT ?;
+"""
+
+CAUSAL_CHAIN_DISPLAY_LIMIT = 50
+
+
+@st.cache_data(show_spinner=False)
+def load_causal_chains(limit=CAUSAL_CHAIN_DISPLAY_LIMIT):
+    """Return (chains, error). `chains` is a list of dicts, most recently
+    generated first -- never restricted to a single "today" date the way
+    Resume du jour is: causal_reasoning.py runs on its own limited quota
+    (see reasoning/causal_reasoning.py's CAUSAL_REASONING_DAILY_LIMIT), so a
+    chain generated a few days ago is still the right thing to show, not a
+    reason to show nothing."""
+    if not os.path.exists(DB_PATH):
+        return [], None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(CAUSAL_CHAINS_SQL, (limit,)).fetchall()
+        conn.close()
+    except sqlite3.Error as exc:
+        return [], str(exc)
+    return [dict(r) for r in rows], None
+
+
+def _parse_entreprises_impactees(raw_json):
+    """[] on anything that isn't a valid JSON array -- never crash the page
+    over a malformed cell."""
+    if not raw_json:
+        return []
+    try:
+        parsed = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+EFFET_COLOR = {"positif": COLOR_GOOD, "negatif": COLOR_BAD, "neutre": COLOR_MID}
+
+
+def render_causal_reasoning_page():
+    st.subheader("Raisonnement causal")
+    chains, error = load_causal_chains()
+    if error:
+        st.error(error)
+        return
+    if not chains:
+        st.info(
+            "Aucune chaine de raisonnement causal generee pour l'instant. "
+            "Lance `python reasoning/causal_reasoning.py` (limite par un "
+            "quota Groq quotidien dedie) puis reviens sur cette page."
+        )
+        return
+
+    latest_date = (chains[0]["created_at"] or "")[:10]
+    note = staleness_note(latest_date) if latest_date else None
+    if note:
+        st.warning(note)
+
+    st.caption(
+        f"{len(chains)} chaine(s) de raisonnement causal disponible(s) "
+        f"(la plus recente : {latest_date}), triees par date decroissante."
+    )
+
+    for chain in chains:
+        chain_date = (chain["created_at"] or "")[:10]
+        with st.container(border=True):
+            c1, c2 = st.columns([3, 1])
+            c1.markdown(f"### {chain['ticker_source']}  --  {chain_date}")
+            if chain["confiance"] is not None:
+                c2.metric("Confiance", f"{chain['confiance']:.0f}%",
+                          help=GLOSSAIRE["Confiance"])
+
+            if chain.get("news_title"):
+                st.caption(f"News d'origine : {chain['news_title']}")
+            else:
+                st.caption(f"News d'origine : news_id={chain['news_id']} "
+                          f"(titre indisponible)")
+
+            st.markdown(highlight_terms(chain["chaine_raisonnement"]),
+                        unsafe_allow_html=True)
+
+            impactees = _parse_entreprises_impactees(chain["entreprises_impactees"])
+            if impactees:
+                with st.expander(f"Entreprises impactees ({len(impactees)})"):
+                    for entry in impactees:
+                        effet = str(entry.get("effet") or "neutre").strip().lower()
+                        color = EFFET_COLOR.get(effet, COLOR_MID)
+                        nom = html.escape(str(entry.get("entreprise") or ""), quote=True)
+                        ticker = entry.get("ticker")
+                        ticker_part = f" ({html.escape(str(ticker), quote=True)})" if ticker else ""
+                        st.markdown(
+                            f"<span style='background-color:{color};color:white;"
+                            f"padding:2px 10px;border-radius:12px;font-size:0.85em;'>"
+                            f"{nom}{ticker_part} -- {effet}</span>",
+                            unsafe_allow_html=True,
+                        )
+            st.caption(f"Modele : {chain['model']}" if chain.get("model") else "")
+
+
 # --- Pages ------------------------------------------------------------------
 
 def _get_scored_data():
@@ -1123,6 +1234,12 @@ def page_opportunities():
     render_opportunities_page()
 
 
+def page_causal_reasoning():
+    """Causal reasoning chains (reasoning/causal_reasoning.py, module 7) --
+    indirect consequence chains grounded in the Knowledge Graph."""
+    render_causal_reasoning_page()
+
+
 # --- Main ------------------------------------------------------------------
 
 def main():
@@ -1143,6 +1260,8 @@ def main():
                 url_path="graph"),
         st.Page(page_opportunities, title="Opportunites du jour",
                 icon=":material/trending_up:", url_path="opportunities"),
+        st.Page(page_causal_reasoning, title="Raisonnement causal",
+                icon=":material/account_tree:", url_path="causal-reasoning"),
     ]
     nav = st.navigation(pages)
 
