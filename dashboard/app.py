@@ -41,7 +41,8 @@ from dashboard.glossaire import GLOSSAIRE, highlight_terms, term_span  # noqa: E
 from reasoning.daily_summary import (  # noqa: E402
     MIN_CONFIDENCE, TICKER_ANALYSIS_DAILY_LIMIT, USAGE_TABLE_TICKER_ANALYSIS,
     add_argued_texts, build_daily_summary, build_signal,
-    load_cached_argument, load_opportunite_for_ticker, staleness_note,
+    load_cached_argument, load_display_name, load_opportunite_for_ticker,
+    staleness_note,
 )
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
@@ -1183,6 +1184,110 @@ def render_causal_reasoning_page():
             st.caption(f"Modele : {chain['model']}" if chain.get("model") else "")
 
 
+# --- Correlations decouvertes (module 8) --------------------------------------
+
+CORRELATIONS_SQL = """
+SELECT ticker_source, ticker_target, relation_type, source_table, lag,
+       lag_direction, coefficient, p_value, p_value_corrigee, n_observations,
+       methode, correction, created_at
+FROM correlations_discovered
+ORDER BY ABS(coefficient) DESC;
+"""
+
+
+@st.cache_data(show_spinner=False)
+def load_correlations():
+    """Return (correlations, error). Each dict also carries the two
+    tickers' real display names (nom_source/nom_target) so the page never
+    shows a bare, unfamiliar ticker with no context."""
+    if not os.path.exists(DB_PATH):
+        return [], None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(CORRELATIONS_SQL).fetchall()]
+        for row in rows:
+            row["nom_source"] = load_display_name(conn, row["ticker_source"])
+            row["nom_target"] = load_display_name(conn, row["ticker_target"])
+        conn.close()
+    except sqlite3.Error as exc:
+        return [], str(exc)
+    return rows, None
+
+
+def _format_lag_direction(row):
+    """Plain-language description of the lag/direction pair -- never uses
+    "predit"/"cause" wording (see render_correlations_page's own caution
+    note): always framed as an observed co-movement pattern, not a forecast."""
+    direction = row["lag_direction"]
+    if direction == "simultane":
+        return "Simultanee (meme jour de bourse)"
+    lag_days = abs(row["lag"])
+    if direction == "source_precede_target":
+        return (f"{row['ticker_source']} en avance sur {row['ticker_target']} "
+                f"de {lag_days} jour(s) de bourse")
+    return (f"{row['ticker_target']} en avance sur {row['ticker_source']} "
+            f"de {lag_days} jour(s) de bourse")
+
+
+def render_correlations_page():
+    st.subheader("Correlations decouvertes")
+    st.info(
+        "Correlation statistique observee sur l'historique disponible -- "
+        "**ce n'est pas une preuve de causalite**. Deux actions peuvent "
+        "evoluer ensemble pour bien d'autres raisons qu'un lien economique "
+        "direct : secteur commun, sentiment de marche general, ou simple "
+        "coincidence statistique. Ces resultats servent a orienter "
+        "l'attention vers des paires deja liees dans le graphe de "
+        "connaissances -- jamais a predire un mouvement futur."
+    )
+
+    correlations, error = load_correlations()
+    if error:
+        st.error(error)
+        return
+    if not correlations:
+        st.info(
+            "Aucune correlation calculee pour l'instant. Lance "
+            "`python reasoning/correlation_discovery.py --source relations` "
+            "puis reviens sur cette page."
+        )
+        return
+
+    st.caption(
+        f"{len(correlations)} correlation(s) retenue(s) ({term_span('p-value corrigee', 'P-value')} "
+        f"&lt; 0.05, apres correction pour tests multiples), triees par force "
+        f"de correlation decroissante.",
+        unsafe_allow_html=True,
+    )
+
+    for row in correlations:
+        with st.container(border=True):
+            st.markdown(
+                f"### {row['ticker_source']} ({row['nom_source']})  &harr;  "
+                f"{row['ticker_target']} ({row['nom_target']})",
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                f"Relation d'origine : {row['relation_type']} "
+                f"(source : {'Knowledge Graph valide' if row['source_table'] == 'relations' else row['source_table']})"
+            )
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Coefficient (Spearman)", f"{row['coefficient']:+.3f}",
+                      help=GLOSSAIRE["Correlation"])
+            c2.metric("P-value corrigee", f"{row['p_value_corrigee']:.4g}",
+                      help=GLOSSAIRE["P-value"])
+            c3.metric("Lag", _format_lag_direction(row), help=GLOSSAIRE["Lag"])
+            c4.metric("Observations", str(row["n_observations"]))
+
+            st.caption(
+                f"Methode : {row['methode']} -- correction : {row['correction']} "
+                f"-- {term_span('significativite statistique', 'Significativite statistique')}",
+                unsafe_allow_html=True,
+            )
+
+
 # --- Pages ------------------------------------------------------------------
 
 def _get_scored_data():
@@ -1240,6 +1345,13 @@ def page_causal_reasoning():
     render_causal_reasoning_page()
 
 
+def page_correlations():
+    """Discovered correlations (reasoning/correlation_discovery.py, module 8)
+    -- statistically retained co-movements between already-known related
+    tickers, never framed as prediction or causation."""
+    render_correlations_page()
+
+
 # --- Main ------------------------------------------------------------------
 
 def main():
@@ -1262,6 +1374,8 @@ def main():
                 icon=":material/trending_up:", url_path="opportunities"),
         st.Page(page_causal_reasoning, title="Raisonnement causal",
                 icon=":material/account_tree:", url_path="causal-reasoning"),
+        st.Page(page_correlations, title="Correlations decouvertes",
+                icon=":material/scatter_plot:", url_path="correlations"),
     ]
     nav = st.navigation(pages)
 

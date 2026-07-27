@@ -132,6 +132,48 @@ def test_page_causal_reasoning_handles_zero_chains_without_crash():
     )
 
 
+def _run_page_correlations():
+    import dashboard.app as app
+    app.load_correlations.clear()
+    app.page_correlations()
+
+
+def _run_page_correlations_zero_rows():
+    # Same discipline as the causal-reasoning zero-state test: no domain
+    # threshold to tweak, so the loader itself is monkeypatched to return an
+    # empty result, exercising the real render_correlations_page() empty-
+    # state branch without touching the real correlations_discovered table.
+    import dashboard.app as app
+    app.load_correlations = lambda: ([], None)
+    app.page_correlations()
+
+
+def test_page_correlations_loads_without_error():
+    """'Correlations decouvertes' (module 8 dashboard page) must render
+    cleanly and must never claim causation -- only a correlation/causation
+    caveat is expected in its info banner."""
+    at = AppTest.from_function(_run_page_correlations, default_timeout=60).run()
+    assert not at.exception, f"page_correlations raised: {list(at.exception)}"
+    subheaders = [s.value for s in at.subheader]
+    assert "Correlations decouvertes" in subheaders
+    infos = [i.value for i in at.info]
+    assert any("preuve de causalite" in i for i in infos), (
+        f"Expected the correlation-is-not-causation caveat, got: {infos}"
+    )
+
+
+def test_page_correlations_handles_zero_rows_without_crash():
+    """When no correlation has been discovered/stored yet, the page must
+    show a clear info message (with the command to run) instead of an
+    empty page."""
+    at = AppTest.from_function(_run_page_correlations_zero_rows, default_timeout=60).run()
+    assert not at.exception, f"page_correlations raised: {list(at.exception)}"
+    infos = [i.value for i in at.info]
+    assert any("Aucune correlation" in i for i in infos), (
+        f"Expected a 'no correlation' info message, got: {infos}"
+    )
+
+
 def test_opportunities_priority_filter_changes_row_count():
     """Regression test: the 'Priorite univers' filter must offer every real
     universe.priorite value (not just a subset seen in already-computed
@@ -197,7 +239,8 @@ def test_glossaire_loads_with_expected_terms():
     expected = {
         "RSI", "Momentum technique", "Moyenne mobile", "Score technique",
         "Prix/Valorisation", "Fondamental reel", "Confiance", "Volatilite",
-        "Breakout", "Priorite",
+        "Breakout", "Priorite", "Correlation", "P-value", "Lag",
+        "Significativite statistique",
     }
     missing = expected - set(GLOSSAIRE)
     assert not missing, f"Glossary missing expected terms: {missing}"

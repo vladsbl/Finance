@@ -143,6 +143,34 @@ GLOSSAIRE = {
         "du projet -- utile pour comprendre le contexte concurrentiel d'un "
         "signal."
     ),
+    "Correlation": (
+        "Mesure (entre -1 et +1) a quel point deux actions evoluent "
+        "ensemble. Proche de +1 : elles montent et descendent souvent en "
+        "meme temps. Proche de -1 : quand l'une monte, l'autre a tendance a "
+        "descendre. Proche de 0 : pas de lien statistique observe. Ce n'est "
+        "PAS une preuve que l'une cause les mouvements de l'autre."
+    ),
+    "P-value": (
+        "Probabilite d'observer une correlation aussi forte par pur hasard "
+        "si, en realite, il n'y avait aucun lien entre les deux actions. "
+        "Plus elle est petite, moins le resultat ressemble a une "
+        "coincidence. Ici, elle est « corrigee » pour tenir compte du grand "
+        "nombre de tests effectues en parallele -- sans cette correction, "
+        "tester beaucoup de paires ferait apparaitre des correlations "
+        "« significatives » par hasard, meme sans aucun lien reel."
+    ),
+    "Lag": (
+        "Decalage, en jours de bourse, entre le mouvement d'une action et "
+        "celui de l'autre. Un lag de 0 veut dire qu'elles bougent le meme "
+        "jour ; un lag de 3 veut dire qu'on regarde si le mouvement d'une "
+        "action se retrouve, 3 jours plus tard, chez l'autre."
+    ),
+    "Significativite statistique": (
+        "Un resultat est juge « statistiquement significatif » quand sa "
+        "p-value (corrigee) passe sous un seuil fixe a l'avance (0.05 ici) "
+        "ET qu'il repose sur assez d'observations communes -- les deux "
+        "conditions doivent etre remplies, sinon le resultat est ecarte."
+    ),
 }
 
 
