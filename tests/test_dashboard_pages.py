@@ -106,9 +106,18 @@ def _run_page_causal_reasoning_zero_chains():
     # No domain threshold to tweak here (unlike MIN_CONFIDENCE for daily
     # summary) -- causal_chains simply has 0 rows in that scenario, so the
     # loader itself is monkeypatched to return an empty result, exercising
-    # the real render_causal_reasoning_page() empty-state branch.
+    # the real render_causal_reasoning_page() empty-state branch. The stub
+    # keeps a no-op .clear() so it stays a safe drop-in replacement for the
+    # real @st.cache_data function everywhere the app calls .clear() on it
+    # -- module state (dashboard.app) is shared across the whole pytest
+    # process, so a plain lambda here would permanently break .clear() for
+    # every test that runs afterwards, not just this one.
     import dashboard.app as app
-    app.load_causal_chains = lambda limit=app.CAUSAL_CHAIN_DISPLAY_LIMIT: ([], None)
+
+    def _stub(limit=app.CAUSAL_CHAIN_DISPLAY_LIMIT):
+        return [], None
+    _stub.clear = lambda: None
+    app.load_causal_chains = _stub
     app.page_causal_reasoning()
 
 
@@ -129,6 +138,107 @@ def test_page_causal_reasoning_handles_zero_chains_without_crash():
     infos = [i.value for i in at.info]
     assert any("Aucune chaine" in i for i in infos), (
         f"Expected a 'no chain' info message, got: {infos}"
+    )
+
+
+def _run_page_causal_reasoning_recalc_available():
+    # Deterministic pending/quota numbers (real ones change day to day, and
+    # today's real quota may already be exhausted from manual testing) --
+    # never touches Groq, only the button's own status display. See
+    # _run_page_causal_reasoning_zero_chains for why the stub needs its own
+    # no-op .clear().
+    import dashboard.app as app
+
+    def _stub(limit=app.CAUSAL_CHAIN_DISPLAY_LIMIT):
+        return [], None
+    _stub.clear = lambda: None
+    app.load_causal_chains = _stub
+    app._causal_reasoning_status = lambda conn: (3, 2, 5, 3)
+    app.page_causal_reasoning()
+
+
+def _run_page_causal_reasoning_recalc_click():
+    # run_causal_reasoning itself is replaced with a canned result -- this
+    # is the module-level name dashboard.app imported from
+    # reasoning.causal_reasoning, so reassigning it here intercepts the
+    # button handler's call without ever reaching Groq. AppTest reruns this
+    # ENTIRE function's source on every .run() (including the rerun
+    # triggered by .click()), so the monkeypatches below apply consistently
+    # across both runs, not just the first. The button handler itself calls
+    # load_causal_chains.clear() after a successful run, so the stub needs
+    # a real (no-op) .clear() too -- see _run_page_causal_reasoning_zero_chains.
+    import dashboard.app as app
+
+    def _stub(limit=app.CAUSAL_CHAIN_DISPLAY_LIMIT):
+        return [], None
+    _stub.clear = lambda: None
+    app.load_causal_chains = _stub
+    app._causal_reasoning_status = lambda conn: (3, 2, 5, 3)
+    app.run_causal_reasoning = lambda conn: {
+        "n_candidates": 3, "processed": 1, "failed": 0,
+        "skipped_no_relations": 0, "quota_used": 3, "quota_limit": 5,
+        "quota_exhausted": False, "error": None,
+    }
+    app.page_causal_reasoning()
+
+
+def _run_page_causal_reasoning_recalc_quota_exhausted():
+    # See _run_page_causal_reasoning_zero_chains for why the stub needs its
+    # own no-op .clear().
+    import dashboard.app as app
+
+    def _stub(limit=app.CAUSAL_CHAIN_DISPLAY_LIMIT):
+        return [], None
+    _stub.clear = lambda: None
+    app.load_causal_chains = _stub
+    app._causal_reasoning_status = lambda conn: (12, 5, 5, 0)
+    app.page_causal_reasoning()
+
+
+def test_page_causal_reasoning_recalc_button_shows_pending_and_quota():
+    """The 'Recalculer maintenant' button's status line must show the
+    pending-news count and today's quota BEFORE any click, so the user
+    knows what to expect."""
+    at = AppTest.from_function(_run_page_causal_reasoning_recalc_available, default_timeout=60).run()
+    assert not at.exception, f"page_causal_reasoning raised: {list(at.exception)}"
+    captions = [c.value for c in at.caption]
+    assert any("3 news eligible" in c and "2/5" in c and "3 restant" in c for c in captions), (
+        f"Expected the pending/quota status line, got: {captions}"
+    )
+    buttons = [b for b in at.button if b.label == "Recalculer maintenant"]
+    assert buttons and not buttons[0].disabled
+
+
+def test_page_causal_reasoning_recalc_button_click_generates_chain_mocked():
+    """Clicking 'Recalculer maintenant' must call run_causal_reasoning (here
+    mocked -- never a real Groq call in tests) and show a success message
+    reflecting the returned stats, with the chain list refreshed
+    automatically (no manual reload needed)."""
+    at = AppTest.from_function(_run_page_causal_reasoning_recalc_click, default_timeout=60).run()
+    assert not at.exception, f"page_causal_reasoning raised: {list(at.exception)}"
+    buttons = [b for b in at.button if b.label == "Recalculer maintenant"]
+    assert buttons, "Expected an enabled 'Recalculer maintenant' button"
+
+    at = buttons[0].click().run()
+    assert not at.exception, f"page_causal_reasoning raised after click: {list(at.exception)}"
+    successes = [s.value for s in at.success]
+    assert any("1 nouvelle" in s for s in successes), (
+        f"Expected a success message mentioning the 1 generated chain, got: {successes}"
+    )
+
+
+def test_page_causal_reasoning_recalc_button_disabled_when_quota_exhausted():
+    """When today's causal-reasoning quota is already used up, the button
+    must be disabled and show the exact 'reessayez demain' message instead
+    of a button that would fail silently or crash if clicked."""
+    at = AppTest.from_function(
+        _run_page_causal_reasoning_recalc_quota_exhausted, default_timeout=60).run()
+    assert not at.exception, f"page_causal_reasoning raised: {list(at.exception)}"
+    buttons = [b for b in at.button if b.label == "Recalculer maintenant"]
+    assert buttons and buttons[0].disabled
+    infos = [i.value for i in at.info]
+    assert any("Quota atteint pour aujourd'hui, reessayez demain" in i for i in infos), (
+        f"Expected the quota-exhausted message, got: {infos}"
     )
 
 

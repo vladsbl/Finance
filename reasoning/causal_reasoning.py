@@ -406,6 +406,118 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
+def run_causal_reasoning(conn, limit=None, threshold=IMPORTANCE_THRESHOLD):
+    """Process up to `limit` (or as many as today's remaining quota allows,
+    if `limit` is None) eligible news items, generating and storing a
+    causal chain for each. Returns a stats dict -- never raises, any setup
+    failure (missing API key, Groq client unavailable) is reported via
+    stats["error"] instead:
+
+        {"n_candidates": int, "processed": int, "failed": int,
+         "skipped_no_relations": int, "quota_used": int, "quota_limit": int,
+         "quota_exhausted": bool, "error": str|None}
+
+    Shared by the CLI (main()) and dashboard/app.py's "Recalculer
+    maintenant" button on the Raisonnement causal page -- both call this
+    exact same function, so they can never drift into two slightly
+    different selection/validation/storage paths."""
+    conn.execute(CREATE_CAUSAL_CHAINS_SQL)
+    conn.execute(_create_usage_table_sql(USAGE_TABLE_CAUSAL))
+    conn.commit()
+
+    today = date.today().isoformat()
+    stats = {
+        "n_candidates": 0, "processed": 0, "failed": 0,
+        "skipped_no_relations": 0,
+        "quota_used": get_usage(conn, USAGE_TABLE_CAUSAL, today),
+        "quota_limit": CAUSAL_REASONING_DAILY_LIMIT,
+        "quota_exhausted": False, "error": None,
+    }
+
+    relations = load_relations(conn)
+    graph = build_graph(relations)
+
+    candidates = load_eligible_news(conn, threshold=threshold)
+    stats["n_candidates"] = len(candidates)
+    if limit is not None:
+        candidates = candidates[:limit]
+
+    if not candidates:
+        return stats
+
+    remaining = max(0, CAUSAL_REASONING_DAILY_LIMIT - stats["quota_used"])
+    if remaining <= 0:
+        stats["quota_exhausted"] = True
+        return stats
+
+    from dotenv import load_dotenv
+    load_dotenv()
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        stats["error"] = "GROQ_API_KEY absent. Ajoutez-la a votre .env."
+        return stats
+
+    try:
+        import httpx
+        from groq import Groq
+        http_client = httpx.Client(verify=CA_BUNDLE) if CA_BUNDLE else None
+        client = Groq(api_key=api_key, http_client=http_client)
+    except Exception as exc:  # noqa: BLE001
+        stats["error"] = f"Client Groq indisponible ({exc})."
+        return stats
+
+    for news in candidates:
+        if get_usage(conn, USAGE_TABLE_CAUSAL, today) >= CAUSAL_REASONING_DAILY_LIMIT:
+            stats["quota_exhausted"] = True
+            logger.warning("Quota atteint en cours de run. Arret.")
+            break
+
+        direct_rels = companies_to_watch(graph, relations, news["ticker"])
+        if not direct_rels:
+            # Should not normally happen given CANDIDATES_SQL's own filter,
+            # but the graph is queried independently here -- never crash on
+            # a mismatch, just skip with a clear reason.
+            stats["skipped_no_relations"] += 1
+            continue
+
+        try:
+            raw = generate_with_retry(client, news, direct_rels)
+        except Exception as exc:  # noqa: BLE001
+            if _is_daily_token_limit(exc):
+                stats["quota_exhausted"] = True
+                logger.warning(
+                    "Quota Groq quotidien (tokens/jour, TPD) atteint apres "
+                    "%d chaine(s) generee(s). Arret du run: %s",
+                    stats["processed"], exc)
+                break
+            logger.error("news_id=%s: appel LLM echoue (%s)", news["news_id"], exc)
+            stats["failed"] += 1
+            continue
+
+        if not raw:
+            stats["failed"] += 1
+            continue
+
+        chaine_texte, impactees, confiance = process_response(news, direct_rels, raw)
+        try:
+            store_causal_chain(conn, news["news_id"], news["ticker"],
+                              chaine_texte, impactees, confiance)
+        except sqlite3.Error as exc:
+            conn.rollback()
+            logger.error("news_id=%s: insertion echouee (%s)", news["news_id"], exc)
+            stats["failed"] += 1
+            continue
+
+        bump_usage(conn, USAGE_TABLE_CAUSAL, today)
+        stats["processed"] += 1
+        logger.info("news_id=%s (%s) : chaine generee, confiance=%.0f%%, "
+                    "%d entreprise(s) impactee(s).",
+                    news["news_id"], news["ticker"], confiance, len(impactees))
+
+    stats["quota_used"] = get_usage(conn, USAGE_TABLE_CAUSAL, today)
+    return stats
+
+
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
 
@@ -418,17 +530,12 @@ def main(argv=None):
     conn.execute(_create_usage_table_sql(USAGE_TABLE_CAUSAL))
     conn.commit()
 
-    relations = load_relations(conn)
-    graph = build_graph(relations)
-
-    candidates = load_eligible_news(conn, threshold=args.threshold)
-    logger.info("Candidats eligibles (importance >= %d, ticker dans le graphe, "
-                "pas encore traites) : %d", args.threshold, len(candidates))
-
-    if args.limit is not None:
-        candidates = candidates[:args.limit]
-
     if args.dry_run:
+        candidates = load_eligible_news(conn, threshold=args.threshold)
+        logger.info("Candidats eligibles (importance >= %d, ticker dans le graphe, "
+                    "pas encore traites) : %d", args.threshold, len(candidates))
+        if args.limit is not None:
+            candidates = candidates[:args.limit]
         for c in candidates:
             logger.info("  news_id=%s %s importance=%s confidence=%s%% : %s",
                         c["news_id"], c["ticker"], c["importance"],
@@ -437,90 +544,24 @@ def main(argv=None):
         conn.close()
         return 0
 
-    if not candidates:
-        logger.info("Rien a traiter.")
-        conn.close()
-        return 0
+    stats = run_causal_reasoning(conn, limit=args.limit, threshold=args.threshold)
+    conn.close()
 
-    today = date.today().isoformat()
-    used_today = get_usage(conn, USAGE_TABLE_CAUSAL, today)
-    remaining = max(0, CAUSAL_REASONING_DAILY_LIMIT - used_today)
-    logger.info("Quota raisonnement causal : %d/%d utilises aujourd'hui, %d restants.",
-                used_today, CAUSAL_REASONING_DAILY_LIMIT, remaining)
-    if remaining <= 0:
-        logger.warning("Quota atteint (%d). Arret avant tout appel.",
-                       CAUSAL_REASONING_DAILY_LIMIT)
-        conn.close()
-        return 0
-
-    from dotenv import load_dotenv
-    load_dotenv()
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        logger.error("GROQ_API_KEY absent. Ajoutez-la a votre .env.")
-        conn.close()
+    if stats["error"]:
+        logger.error(stats["error"])
         return 1
 
-    import httpx
-    from groq import Groq
-    http_client = httpx.Client(verify=CA_BUNDLE) if CA_BUNDLE else None
-    client = Groq(api_key=api_key, http_client=http_client)
-
-    processed = 0
-    failed = 0
-    skipped_no_relations = 0
-    for news in candidates:
-        if get_usage(conn, USAGE_TABLE_CAUSAL, today) >= CAUSAL_REASONING_DAILY_LIMIT:
-            logger.warning("Quota atteint en cours de run. Arret.")
-            break
-
-        direct_rels = companies_to_watch(graph, relations, news["ticker"])
-        if not direct_rels:
-            # Should not normally happen given CANDIDATES_SQL's own filter,
-            # but the graph is queried independently here -- never crash on
-            # a mismatch, just skip with a clear reason.
-            skipped_no_relations += 1
-            continue
-
-        try:
-            raw = generate_with_retry(client, news, direct_rels)
-        except Exception as exc:  # noqa: BLE001
-            if _is_daily_token_limit(exc):
-                logger.warning(
-                    "Quota Groq quotidien (tokens/jour, TPD) atteint apres "
-                    "%d chaine(s) generee(s). Arret du run: %s", processed, exc)
-                break
-            logger.error("news_id=%s: appel LLM echoue (%s)", news["news_id"], exc)
-            failed += 1
-            continue
-
-        if not raw:
-            failed += 1
-            continue
-
-        chaine_texte, impactees, confiance = process_response(news, direct_rels, raw)
-        try:
-            store_causal_chain(conn, news["news_id"], news["ticker"],
-                              chaine_texte, impactees, confiance)
-        except sqlite3.Error as exc:
-            conn.rollback()
-            logger.error("news_id=%s: insertion echouee (%s)", news["news_id"], exc)
-            failed += 1
-            continue
-
-        bump_usage(conn, USAGE_TABLE_CAUSAL, today)
-        processed += 1
-        logger.info("news_id=%s (%s) : chaine generee, confiance=%.0f%%, "
-                    "%d entreprise(s) impactee(s).",
-                    news["news_id"], news["ticker"], confiance, len(impactees))
-
+    logger.info("Candidats eligibles (importance >= %d, ticker dans le graphe, "
+                "pas encore traites) : %d", args.threshold, stats["n_candidates"])
+    if stats["quota_exhausted"] and stats["processed"] == 0:
+        logger.warning("Quota atteint (%d). Arret avant tout appel.",
+                       CAUSAL_REASONING_DAILY_LIMIT)
     logger.info(
         "Termine. %d chaine(s) generee(s), %d echec(s), %d ignore(s) (sans "
         "relation KG). Quota utilise: %d/%d.",
-        processed, failed, skipped_no_relations,
-        get_usage(conn, USAGE_TABLE_CAUSAL, today), CAUSAL_REASONING_DAILY_LIMIT,
+        stats["processed"], stats["failed"], stats["skipped_no_relations"],
+        stats["quota_used"], stats["quota_limit"],
     )
-    conn.close()
     return 0
 
 

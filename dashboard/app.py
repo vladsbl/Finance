@@ -40,9 +40,13 @@ from dashboard.currency import CURRENCY_SYMBOLS, format_amount, get_rate_to_eur 
 from dashboard.glossaire import GLOSSAIRE, highlight_terms, term_span  # noqa: E402
 from reasoning.daily_summary import (  # noqa: E402
     MIN_CONFIDENCE, TICKER_ANALYSIS_DAILY_LIMIT, USAGE_TABLE_TICKER_ANALYSIS,
-    add_argued_texts, build_daily_summary, build_signal,
+    add_argued_texts, build_daily_summary, build_signal, get_usage,
     load_cached_argument, load_display_name, load_opportunite_for_ticker,
     staleness_note, staleness_summary,
+)
+from reasoning.causal_reasoning import (  # noqa: E402
+    CAUSAL_REASONING_DAILY_LIMIT, IMPORTANCE_THRESHOLD, USAGE_TABLE_CAUSAL,
+    load_eligible_news, run_causal_reasoning,
 )
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
@@ -1298,8 +1302,89 @@ def _parse_entreprises_impactees(raw_json):
 EFFET_COLOR = {"positif": COLOR_GOOD, "negatif": COLOR_BAD, "neutre": COLOR_MID}
 
 
+def _causal_reasoning_status(conn):
+    """(n_pending, quota_used, quota_limit, quota_remaining) for the
+    "Recalculer maintenant" button -- a lightweight SQL query, recomputed
+    fresh on every page load (not cached) so the numbers shown are always
+    accurate right before the user decides whether to click."""
+    candidates = load_eligible_news(conn, threshold=IMPORTANCE_THRESHOLD)
+    today = date.today().isoformat()
+    used = get_usage(conn, USAGE_TABLE_CAUSAL, today)
+    remaining = max(0, CAUSAL_REASONING_DAILY_LIMIT - used)
+    return len(candidates), used, CAUSAL_REASONING_DAILY_LIMIT, remaining
+
+
+def _render_causal_recalc_button():
+    """"Recalculer maintenant" -- forces reasoning/causal_reasoning.py's
+    run_causal_reasoning() on-demand instead of waiting for the daily
+    pipeline (pipeline/run_daily.py), scoped to the SAME quota table
+    (llm_usage_causal_reasoning) and the SAME eligible-news query, so a
+    dashboard click and a pipeline run can never double-count or disagree
+    about what "already processed" means."""
+    if not os.path.exists(DB_PATH):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        def _status_line(n_pending, quota_used, quota_limit, quota_remaining):
+            return (
+                f"{n_pending} news eligible(s) en attente de traitement -- "
+                f"quota du jour : {quota_used}/{quota_limit} utilise(s), "
+                f"{quota_remaining} restant(s)."
+            )
+
+        n_pending, quota_used, quota_limit, quota_remaining = _causal_reasoning_status(conn)
+
+        col_info, col_btn = st.columns([3, 1])
+        # st.empty() placeholder: updated in place after a click so the
+        # numbers reflect what just happened (quota consumed, backlog
+        # shrunk) instead of staying frozen at their pre-click values for
+        # the rest of this same render.
+        status_placeholder = col_info.empty()
+        status_placeholder.caption(_status_line(n_pending, quota_used, quota_limit, quota_remaining))
+
+        if quota_remaining <= 0:
+            col_btn.button("Recalculer maintenant", disabled=True, key="causal_recalc_btn")
+            st.info("Quota atteint pour aujourd'hui, reessayez demain.")
+            return
+        if n_pending == 0:
+            col_btn.button("Recalculer maintenant", disabled=True, key="causal_recalc_btn")
+            return
+
+        if col_btn.button("Recalculer maintenant", key="causal_recalc_btn"):
+            with st.spinner("Generation des chaines causales en cours (Groq)..."):
+                stats = run_causal_reasoning(conn)
+            # Invalidates the cached chain list so the render below (later
+            # in this same script run) picks up whatever was just generated
+            # -- no st.rerun() needed, Streamlit already reruns the whole
+            # page on a button click.
+            load_causal_chains.clear()
+
+            status_placeholder.caption(_status_line(*_causal_reasoning_status(conn)))
+
+            if stats["error"]:
+                st.error(f"Echec de la generation : {stats['error']}")
+            elif stats["quota_exhausted"] and stats["processed"] == 0:
+                st.warning("Quota atteint pour aujourd'hui, reessayez demain.")
+            elif stats["processed"] == 0:
+                st.warning(
+                    f"Aucune chaine generee ({stats['failed']} echec(s), "
+                    f"{stats['skipped_no_relations']} ignoree(s) sans relation "
+                    f"dans le graphe de connaissances)."
+                )
+            else:
+                st.success(
+                    f"{stats['processed']} nouvelle(s) chaine(s) de raisonnement "
+                    f"causal generee(s)."
+                    + (f" {stats['failed']} echec(s)." if stats["failed"] else "")
+                )
+    finally:
+        conn.close()
+
+
 def render_causal_reasoning_page():
     st.subheader("Raisonnement causal")
+    _render_causal_recalc_button()
+    st.divider()
     chains, error = load_causal_chains()
     if error:
         st.error(error)
