@@ -42,7 +42,7 @@ from reasoning.daily_summary import (  # noqa: E402
     MIN_CONFIDENCE, TICKER_ANALYSIS_DAILY_LIMIT, USAGE_TABLE_TICKER_ANALYSIS,
     add_argued_texts, build_daily_summary, build_signal,
     load_cached_argument, load_display_name, load_opportunite_for_ticker,
-    staleness_note,
+    staleness_note, staleness_summary,
 )
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
@@ -802,9 +802,11 @@ def render_graph_page():
     # "Primary" (highlighted) nodes reflect TODAY's best opportunites --
     # not a fixed 10-pilot-ticker list -- so the graph's emphasis moves with
     # the data instead of always spotlighting the same tickers. Reuses
-    # load_opportunites(), already resolved to the latest available
-    # date_calcul (see reasoning/daily_summary.py's resolve_data_date for
-    # the same freshness reasoning), ranked by score_global desc.
+    # load_opportunites(), which now resolves the latest date_calcul PER
+    # universe.priorite tier independently (see OPPORTUNITES_SQL's own
+    # docstring) -- the top 10 can therefore span tiers refreshed on
+    # different days, so its own date label is shown per-date, not assumed
+    # to be a single value.
     opp_df, _ = load_opportunites()
     top_tickers = list(opp_df["ticker"].head(10)) if not opp_df.empty else []
 
@@ -814,9 +816,10 @@ def render_graph_page():
     st.caption(f"{graph.number_of_nodes()} noeuds ({n_primary} suivis, "
                f"{n_external} externes) - {graph.number_of_edges()} relations")
     if top_tickers:
-        data_date = opp_df["date_calcul"].iloc[0]
+        top_dates = sorted(set(opp_df["date_calcul"].head(10)))
+        date_label = top_dates[0] if len(top_dates) == 1 else f"dates variees ({', '.join(top_dates)})"
         st.caption(
-            f"Noeuds mis en avant = top 10 opportunites du {data_date} : "
+            f"Noeuds mis en avant = top 10 opportunites (donnees du {date_label}) : "
             + ", ".join(top_tickers)
         )
 
@@ -858,6 +861,15 @@ def render_graph_page():
 # (scraped at universe-build time) when nom_entreprise is null/empty OR fell
 # back to the bare ticker itself (see universe/fetch_company_names.py),
 # falling back to the ticker as the last resort. Never null.
+#
+# The `latest` subquery resolves the freshest date_calcul PER priorite tier
+# independently (mirrors reasoning.daily_summary.resolve_data_dates_by_
+# priority) instead of a single WHERE date_calcul = MAX(date_calcul) across
+# the whole table -- that single-global-date form silently drops an entire
+# tier the moment another tier gets recomputed more recently (observed for
+# real: "basse" refreshed daily during the Knowledge Graph extension work
+# while "haute"/"moyenne" sat 5 days stale, making them vanish from this
+# page and from the Knowledge Graph page's "top 10" highlight entirely).
 OPPORTUNITES_SQL = """
 SELECT o.ticker,
        COALESCE(NULLIF(u.nom_entreprise, o.ticker), NULLIF(u.nom, ''), o.ticker) AS nom_affiche,
@@ -866,7 +878,11 @@ SELECT o.ticker,
        o.date_calcul, u.priorite
 FROM opportunites o
 JOIN universe u ON u.ticker = o.ticker
-WHERE o.date_calcul = (SELECT MAX(date_calcul) FROM opportunites)
+JOIN (
+    SELECT u2.priorite AS priorite, MAX(o2.date_calcul) AS max_date
+    FROM opportunites o2 JOIN universe u2 ON u2.ticker = o2.ticker
+    GROUP BY u2.priorite
+) latest ON latest.priorite = u.priorite AND latest.max_date = o.date_calcul
 ORDER BY (o.score_global IS NULL), o.score_global DESC;
 """
 
@@ -917,7 +933,19 @@ def render_opportunities_page():
         )
         return
 
-    st.caption(f"Calcule le {df['date_calcul'].iloc[0]} - {len(df)} tickers")
+    # Each priorite tier is already resolved to its OWN latest date_calcul
+    # (see OPPORTUNITES_SQL's docstring), so `df` can legitimately mix dates
+    # across tiers -- show the single date when they agree, or the same
+    # per-tier freshness breakdown as Resume du jour when they diverge,
+    # rather than silently picking one row's date as if it applied to all.
+    dates_by_priority = df.groupby("priorite")["date_calcul"].max().to_dict()
+    if len(set(dates_by_priority.values())) == 1:
+        st.caption(f"Calcule le {next(iter(dates_by_priority.values()))} - {len(df)} tickers")
+    else:
+        st.caption(f"{len(df)} tickers")
+        note = staleness_summary(dates_by_priority)
+        if note:
+            st.warning(note)
 
     # A fixed, tiny set of options (4 tiers) is a click choice, not something
     # to search for -- st.pills (pure click, no text input) avoids the false
@@ -991,26 +1019,31 @@ RISK_COLOR = {"Faible": COLOR_GOOD, "Modere": COLOR_MID, "Eleve": COLOR_BAD}
 
 @st.cache_data(show_spinner=False)
 def load_daily_summary():
-    """Return (signals, today, n_candidates, error)."""
+    """Return (signals, dates_by_priority, n_candidates, error).
+    dates_by_priority is {priorite: date_calcul} -- see
+    reasoning.daily_summary.build_daily_summary's docstring: candidates are
+    drawn from EVERY universe.priorite tier at its own latest date_calcul,
+    not a single global-max date that would silently hide whichever tier
+    was recomputed less recently than another."""
     if not os.path.exists(DB_PATH):
-        return [], None, 0, None
+        return [], {}, 0, None
     try:
         conn = sqlite3.connect(DB_PATH)
-        signals, today, n_candidates = build_daily_summary(conn)
+        signals, dates_by_priority, n_candidates = build_daily_summary(conn)
         add_argued_texts(conn, signals)
         conn.close()
     except sqlite3.Error as exc:
-        return [], None, 0, str(exc)
-    return signals, today, n_candidates, None
+        return [], {}, 0, str(exc)
+    return signals, dates_by_priority, n_candidates, None
 
 
 def render_daily_summary_page():
     st.subheader("Resume du jour")
-    signals, today, n_candidates, error = load_daily_summary()
+    signals, dates_by_priority, n_candidates, error = load_daily_summary()
     if error:
         st.error(error)
         return
-    if today is None:
+    if not dates_by_priority:
         st.info(
             "Aucune opportunite calculee pour l'instant. Lance "
             "`python reasoning/opportunity_scoring.py --priorite haute` "
@@ -1018,11 +1051,15 @@ def render_daily_summary_page():
         )
         return
 
+    if len(set(dates_by_priority.values())) == 1:
+        date_label = next(iter(dates_by_priority.values()))
+    else:
+        date_label = "plusieurs dates par palier (voir ci-dessous)"
     st.caption(
-        f"{today} - {len(signals)} signal(aux) retenu(s) sur {n_candidates} "
+        f"{date_label} - {len(signals)} signal(aux) retenu(s) sur {n_candidates} "
         f"candidat(s) eligible(s) (confiance >= {MIN_CONFIDENCE:.0f}%)"
     )
-    note = staleness_note(today)
+    note = staleness_summary(dates_by_priority)
     if note:
         st.warning(note)
 

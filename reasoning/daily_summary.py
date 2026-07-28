@@ -180,15 +180,35 @@ def compute_risk(volatility, confiance, conflict):
 # --- Data access -----------------------------------------------------------
 
 def load_opportunites_for_date(conn, data_date):
-    """opportunites rows for one exact date_calcul (with a real score).
-    Renamed from load_today_opportunites: the date passed in is not
-    necessarily today's calendar date (see resolve_data_date) -- the old
-    name implied a literalness that no longer holds."""
+    """opportunites rows for one exact date_calcul (with a real score), ACROSS
+    every priorite tier at once. Renamed from load_today_opportunites: the
+    date passed in is not necessarily today's calendar date (see
+    resolve_data_date) -- the old name implied a literalness that no longer
+    holds. Superseded, for cross-tier selection, by load_opportunites_multi
+    below -- see resolve_data_date's docstring for why a single flat date
+    silently drops any tier recomputed less recently than another."""
     conn.row_factory = sqlite3.Row
     return conn.execute(
         "SELECT * FROM opportunites WHERE date_calcul = ? AND score_global IS NOT NULL",
         (data_date,),
     ).fetchall()
+
+
+def load_opportunites_multi(conn, dates_by_priority):
+    """opportunites rows across ALL priorite tiers, each restricted to its
+    OWN latest date_calcul (see resolve_data_dates_by_priority) -- the
+    combined replacement for load_opportunites_for_date's single flat date
+    whenever candidates must be drawn from the whole universe, not just
+    whichever tier happens to hold the table's global MAX(date_calcul)."""
+    conn.row_factory = sqlite3.Row
+    rows = []
+    for priorite, data_date in dates_by_priority.items():
+        rows.extend(conn.execute(
+            "SELECT o.* FROM opportunites o JOIN universe u ON u.ticker = o.ticker "
+            "WHERE u.priorite = ? AND o.date_calcul = ? AND o.score_global IS NOT NULL",
+            (priorite, data_date),
+        ).fetchall())
+    return rows
 
 
 def load_opportunite_for_ticker(conn, ticker):
@@ -207,21 +227,54 @@ def load_opportunite_for_ticker(conn, ticker):
 
 
 def resolve_data_date(conn, explicit_date):
-    """The date_calcul to actually use: `explicit_date` if given (e.g. the
-    CLI's --date override, for testing a specific past snapshot), otherwise
-    the LATEST date_calcul actually present in `opportunites` -- which is
-    not necessarily today's calendar date. `opportunites` is only as fresh
-    as the last time reasoning/opportunity_scoring.py was run; filtering
-    strictly on date.today() silently returns zero rows (and a misleading
-    "0 candidates" message that reads as "nothing interesting today" rather
-    than "the pipeline hasn't run in N days") whenever a day was skipped,
-    even though a fully-computed snapshot is sitting right there. Mirrors
-    dashboard/app.py's OPPORTUNITES_SQL, which already resolves the same way
-    -- this fixes the two pages disagreeing about which tickers exist."""
+    """The single date_calcul to use across the WHOLE `opportunites` table
+    at once: `explicit_date` if given, otherwise the latest date_calcul
+    present ANYWHERE in the table, regardless of which universe.priorite
+    tier produced it.
+
+    Superseded, for cross-tier selection (Resume du jour, notifications),
+    by resolve_data_dates_by_priority() below: once one priorite tier
+    (e.g. "basse") starts being recomputed on its own, more frequent
+    cadence than the others, this single global MAX(date_calcul) silently
+    "wins" for that tier and hides every other tier's rows from that day
+    onward -- even though their own last snapshot (just a few days older)
+    is still perfectly valid. Observed for real: "haute"/"moyenne" hadn't
+    been recomputed in 5 days while "basse" had just been refreshed, and
+    every "today's opportunities" consumer ended up drawing 100% of its
+    candidates from "basse" alone, silently. Kept here only for callers
+    that genuinely want one flat date across the whole table (e.g. a
+    --date override applied uniformly for testing a specific past
+    snapshot)."""
     if explicit_date:
         return explicit_date
     row = conn.execute("SELECT MAX(date_calcul) FROM opportunites").fetchone()
     return row[0] if row else None
+
+
+def resolve_data_dates_by_priority(conn, explicit_date=None):
+    """{priorite: date_calcul} -- the latest date_calcul available for EACH
+    universe.priorite tier (haute/moyenne/basse) INDEPENDENTLY, instead of
+    one date across the whole table (see resolve_data_date's docstring for
+    why that silently hides whichever tier was recomputed less recently).
+    This is the primary building block for any "today's best across the
+    whole universe" selection (build_daily_summary,
+    reasoning/notifications.py): each tier contributes its own rows at its
+    own freshest date, so a stale tier still participates -- it is simply
+    flagged as stale (see staleness_summary), never silently dropped.
+
+    `explicit_date` (the CLI's --date override, for testing a specific past
+    snapshot) applies uniformly to every tier when given."""
+    if explicit_date:
+        priorites = [r[0] for r in conn.execute(
+            "SELECT DISTINCT priorite FROM universe WHERE priorite IS NOT NULL")]
+        return {p: explicit_date for p in priorites}
+    rows = conn.execute(
+        "SELECT u.priorite, MAX(o.date_calcul) FROM opportunites o "
+        "JOIN universe u ON u.ticker = o.ticker "
+        "WHERE u.priorite IS NOT NULL "
+        "GROUP BY u.priorite"
+    ).fetchall()
+    return {priorite: data_date for priorite, data_date in rows if data_date}
 
 
 def data_age_days(data_date):
@@ -246,6 +299,29 @@ def staleness_note(data_date):
         return None
     day_word = "jour" if age == 1 else "jours"
     return f"Donnees du {data_date}, non recalculees depuis {age} {day_word}."
+
+
+def staleness_summary(dates_by_priority):
+    """Human-readable freshness line across ALL priorite tiers at once: a
+    single staleness_note()-style line when every tier happens to share the
+    same date_calcul (nothing to distinguish), or an explicit per-tier
+    breakdown when they differ -- e.g. "haute : donnees du 2026-07-22 (5j)
+    | moyenne : donnees du 2026-07-22 (5j) | basse : donnees du 2026-07-27
+    (0j)" -- so a stale tier is always visible, never averaged away or
+    silently hidden behind a single date that happens to belong to a
+    different, fresher tier."""
+    if not dates_by_priority:
+        return None
+    distinct_dates = set(dates_by_priority.values())
+    if len(distinct_dates) <= 1:
+        return staleness_note(next(iter(distinct_dates), None))
+    parts = []
+    for priorite in sorted(dates_by_priority):
+        data_date = dates_by_priority[priorite]
+        age = data_age_days(data_date)
+        age_txt = f"{age}j" if age is not None else "age inconnu"
+        parts.append(f"{priorite} : donnees du {data_date} ({age_txt})")
+    return "Fraicheur par palier -- " + " | ".join(parts)
 
 
 def load_price_series(conn, ticker):
@@ -654,18 +730,23 @@ def add_argued_texts(conn, signals, usage_table=USAGE_TABLE_SUMMARY,
 # --- Orchestration ---------------------------------------------------------
 
 def build_daily_summary(conn, today=None):
-    """Return (signals, data_date, n_candidates). ``signals`` has at most
-    TOP_N entries, fewer if not enough tickers clear MIN_CONFIDENCE.
-    ``data_date`` is the date_calcul actually used -- the latest one
-    available in `opportunites` unless `today` explicitly overrides it (see
-    resolve_data_date) -- and is not necessarily today's calendar date;
-    callers must surface it (and ideally staleness_note(data_date)) so stale
-    data is visible, never silent."""
-    data_date = resolve_data_date(conn, today)
-    if data_date is None:
-        return [], None, 0
+    """Return (signals, dates_by_priority, n_candidates). ``signals`` has at
+    most TOP_N entries, fewer if not enough tickers clear MIN_CONFIDENCE.
+    ``dates_by_priority`` is {priorite: date_calcul} (see
+    resolve_data_dates_by_priority) -- NOT a single date -- because
+    candidates are now drawn from EVERY priorite tier at its own latest
+    date_calcul, so a tier recomputed less recently than another is still
+    considered, never silently excluded (see resolve_data_date's docstring
+    for the bug this replaced: "basse" being refreshed more often than
+    "haute"/"moyenne" used to make the latter invisible to this exact
+    function). Callers must surface dates_by_priority (and ideally
+    staleness_summary(dates_by_priority)) so a stale tier is visible,
+    never silent."""
+    dates_by_priority = resolve_data_dates_by_priority(conn, today)
+    if not dates_by_priority:
+        return [], {}, 0
 
-    rows = load_opportunites_for_date(conn, data_date)
+    rows = load_opportunites_multi(conn, dates_by_priority)
     eligible = [r for r in rows if r["confiance"] is not None and r["confiance"] >= MIN_CONFIDENCE]
 
     ranked = sorted(
@@ -679,7 +760,7 @@ def build_daily_summary(conn, today=None):
     graph = build_graph(relations)
     signals = [build_signal(conn, r, graph, relations) for r in top]
 
-    return signals, data_date, len(eligible)
+    return signals, dates_by_priority, len(eligible)
 
 
 def build_signal(conn, row, graph, relations):
@@ -733,10 +814,14 @@ def _fmt_pct(value):
     return f"{value:.0%}" if value is not None else "n/a"
 
 
-def print_summary(signals, today, n_candidates):
+def print_summary(signals, dates_by_priority, n_candidates):
     print("\n" + "=" * 78)
-    print(f"RESUME DU JOUR - {today}")
-    note = staleness_note(today)
+    if dates_by_priority:
+        dates_str = ", ".join(f"{p}={d}" for p, d in sorted(dates_by_priority.items()))
+    else:
+        dates_str = "aucune donnee"
+    print(f"RESUME DU JOUR - {dates_str}")
+    note = staleness_summary(dates_by_priority)
     if note:
         print(f"[!] {note}")
     print("=" * 78)
@@ -776,13 +861,13 @@ def main(argv=None):
         return 1
 
     conn = sqlite3.connect(DB_PATH)
-    signals, today, n_candidates = build_daily_summary(conn, today=args.date)
+    signals, dates_by_priority, n_candidates = build_daily_summary(conn, today=args.date)
     add_argued_texts(conn, signals)
     conn.close()
 
-    print_summary(signals, today, n_candidates)
-    logger.info("Resume genere pour %s : %d signal(aux) (sur %d candidats eligibles).",
-                today, len(signals), n_candidates)
+    print_summary(signals, dates_by_priority, n_candidates)
+    logger.info("Resume genere (%s) : %d signal(aux) (sur %d candidats eligibles).",
+                dates_by_priority, len(signals), n_candidates)
     return 0
 
 

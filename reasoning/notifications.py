@@ -63,7 +63,7 @@ configure_ca_bundle(DATA_DIR)
 from graph.build_graph import build_graph, load_relations  # noqa: E402
 from reasoning.daily_summary import (  # noqa: E402
     build_signal, compute_adjusted_score, load_cached_argument,
-    load_opportunites_for_date, resolve_data_date, staleness_note,
+    load_opportunites_multi, resolve_data_dates_by_priority, staleness_summary,
 )
 
 logging.basicConfig(
@@ -88,13 +88,20 @@ TELEGRAM_TIMEOUT_S = 15
 
 # --- Selection ---------------------------------------------------------------
 
-def find_notable_opportunities(conn, data_date, min_score_ajuste=MIN_SCORE_AJUSTE):
-    """All `opportunites` rows for `data_date` whose score_ajuste clears
+def find_notable_opportunities(conn, dates_by_priority, min_score_ajuste=MIN_SCORE_AJUSTE):
+    """All `opportunites` rows -- across EVERY priorite tier, each at its
+    own latest date_calcul (see reasoning.daily_summary.
+    resolve_data_dates_by_priority) -- whose score_ajuste clears
     `min_score_ajuste`, sorted descending. Returns [] if none do (or if
-    data_date is None) -- never raises."""
-    if not data_date:
+    dates_by_priority is empty/None) -- never raises. Scanning every tier
+    independently (not a single global-max date) matters here specifically:
+    an alert meant to catch "anything notable across the whole universe"
+    must not silently go blind to "haute"/"moyenne" the moment "basse"
+    happens to be refreshed more recently (see
+    resolve_data_date's docstring for the bug this replaced)."""
+    if not dates_by_priority:
         return []
-    rows = load_opportunites_for_date(conn, data_date)
+    rows = load_opportunites_multi(conn, dates_by_priority)
     notable = [
         r for r in rows
         if r["confiance"] is not None
@@ -157,9 +164,13 @@ def format_signal_block(signal):
     return "\n".join(lines)
 
 
-def format_message(signals, data_date):
-    header = f"*Opportunites du jour* -- {data_date}"
-    note = staleness_note(data_date)
+def format_message(signals, dates_by_priority):
+    distinct_dates = set(dates_by_priority.values()) if dates_by_priority else set()
+    if len(distinct_dates) == 1:
+        header = f"*Opportunites du jour* -- {next(iter(distinct_dates))}"
+    else:
+        header = "*Opportunites du jour*"
+    note = staleness_summary(dates_by_priority)
     parts = [header]
     if note:
         parts.append(f"_{note}_")
@@ -227,30 +238,30 @@ def run_notifications(conn, min_score_ajuste=MIN_SCORE_AJUSTE, dry_run=False,
     build signals, format, send (unless dry_run). Returns (sent_bool,
     message_or_None, n_notable) -- sent_bool is False (not an error) when
     there was simply nothing to report."""
-    data_date = resolve_data_date(conn, date_override)
-    if data_date is None:
+    dates_by_priority = resolve_data_dates_by_priority(conn, date_override)
+    if not dates_by_priority:
         logger.info("Aucune donnee dans opportunites -- rien a notifier.")
         return False, None, 0
 
-    rows = find_notable_opportunities(conn, data_date, min_score_ajuste)
+    rows = find_notable_opportunities(conn, dates_by_priority, min_score_ajuste)
     if not rows:
         logger.info("Aucune opportunite ne depasse le seuil (%.0f) pour %s -- "
                     "aucune notification envoyee (comportement attendu, pas une erreur).",
-                    min_score_ajuste, data_date)
+                    min_score_ajuste, dates_by_priority)
         return False, None, 0
 
     signals = build_notification_signals(conn, rows)
-    message = format_message(signals, data_date)
+    message = format_message(signals, dates_by_priority)
 
     if dry_run:
         logger.info("[DRY-RUN] %d opportunite(s) notable(s) pour %s. Message non envoye.",
-                    len(signals), data_date)
+                    len(signals), dates_by_priority)
         return False, message, len(signals)
 
     ok = send_telegram_message(message)
     if ok:
-        logger.info("Notification Telegram envoyee (%d opportunite(s), seuil %.0f, date %s).",
-                    len(signals), min_score_ajuste, data_date)
+        logger.info("Notification Telegram envoyee (%d opportunite(s), seuil %.0f, dates %s).",
+                    len(signals), min_score_ajuste, dates_by_priority)
     else:
         logger.warning("Notification Telegram NON envoyee (echec -- voir logs ci-dessus). "
                         "Le pipeline continue normalement.")

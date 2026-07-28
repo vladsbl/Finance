@@ -96,12 +96,12 @@ def test_send_telegram_message_markdown_parse_error_retries_plain_text():
 def test_find_notable_opportunities_returns_list_never_raises():
     conn = _real_conn()
     try:
-        row = conn.execute("SELECT MAX(date_calcul) FROM opportunites").fetchone()
-        data_date = row[0]
-        rows = notifications.find_notable_opportunities(conn, data_date, min_score_ajuste=0.0)
+        dates_by_priority = notifications.resolve_data_dates_by_priority(conn)
+        rows = notifications.find_notable_opportunities(conn, dates_by_priority, min_score_ajuste=0.0)
         assert isinstance(rows, list)
-        # threshold 0 must include every scored row for that date
-        all_rows = notifications.load_opportunites_for_date(conn, data_date) if data_date else []
+        # threshold 0 must include every scored row across every tier's own
+        # latest date_calcul (see load_opportunites_multi)
+        all_rows = notifications.load_opportunites_multi(conn, dates_by_priority) if dates_by_priority else []
         assert len(rows) == len([r for r in all_rows if r["confiance"] is not None])
     finally:
         conn.close()
@@ -110,9 +110,8 @@ def test_find_notable_opportunities_returns_list_never_raises():
 def test_find_notable_opportunities_impossible_threshold_returns_empty():
     conn = _real_conn()
     try:
-        row = conn.execute("SELECT MAX(date_calcul) FROM opportunites").fetchone()
-        data_date = row[0]
-        rows = notifications.find_notable_opportunities(conn, data_date, min_score_ajuste=1000.0)
+        dates_by_priority = notifications.resolve_data_dates_by_priority(conn)
+        rows = notifications.find_notable_opportunities(conn, dates_by_priority, min_score_ajuste=1000.0)
         assert rows == []
     finally:
         conn.close()
@@ -121,7 +120,7 @@ def test_find_notable_opportunities_impossible_threshold_returns_empty():
 def test_find_notable_opportunities_no_data_date_returns_empty():
     conn = _real_conn()
     try:
-        rows = notifications.find_notable_opportunities(conn, None)
+        rows = notifications.find_notable_opportunities(conn, {})
         assert rows == []
     finally:
         conn.close()
