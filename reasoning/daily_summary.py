@@ -333,6 +333,71 @@ def load_price_series(conn, ticker):
     return [r[0] for r in rows]
 
 
+# Trading-day lags (not calendar days) for the price variation shown
+# alongside every signal -- short/medium/long enough to be readable at a
+# glance without drowning the signal in a full price history chart.
+PRICE_VARIATION_LAGS = {"1j": 1, "7j": 7, "30j": 30}
+
+
+def compute_price_variation(conn, ticker):
+    """{"prix_actuel": float, "devise": str, "variations": {"1j": pct|None,
+    "7j": pct|None, "30j": pct|None}}, or None if price_history has no
+    usable close for this ticker at all. Percentages are computed on the
+    NATIVE-currency close series (a % change is currency-invariant, so no
+    EUR conversion is needed here -- only the absolute "prix_actuel" itself
+    needs converting for display, which callers do via dashboard/currency.py
+    at render/prompt-build time, keeping this module currency-agnostic).
+    A lag longer than the available history yields None for that specific
+    window rather than a misleading calculation against too short a
+    series -- never invents a number that isn't there."""
+    closes = load_price_series(conn, ticker)
+    if not closes:
+        return None
+
+    current = closes[-1]
+    variations = {}
+    for label, lag in PRICE_VARIATION_LAGS.items():
+        if len(closes) <= lag or not closes[-1 - lag]:
+            variations[label] = None
+        else:
+            base = closes[-1 - lag]
+            variations[label] = (current - base) / base * 100.0
+
+    devise_row = conn.execute(
+        "SELECT devise FROM universe WHERE ticker = ?", (ticker,)
+    ).fetchone()
+    devise = devise_row[0] if devise_row and devise_row[0] else "USD"
+
+    return {"prix_actuel": current, "devise": devise, "variations": variations}
+
+
+def format_price_line(conn, price_info):
+    """Human-readable price line with EUR conversion (display-only, same
+    convention as dashboard/currency.py -- price_history itself is never
+    touched or re-stored in a different currency), e.g. "172.34 EUR
+    (variation 1j: +0.8%, 7j: +2.1%, 30j: -1.4%)". None if `price_info` is
+    None (no price data at all for this ticker). A missing individual
+    variation (too little history for that lag) is shown as "n/a", never
+    silently omitted -- so the reader knows it was checked, not forgotten."""
+    if price_info is None:
+        return None
+    # Lazy import: dashboard/currency.py has no Streamlit dependency (pure
+    # sqlite3/yfinance), so this is safe to call from a CLI/reasoning
+    # context, but kept local rather than a module-level import to avoid
+    # reasoning/ taking a permanent hard dependency on dashboard/.
+    from dashboard.currency import format_amount, get_rate_to_eur
+
+    rate = get_rate_to_eur(conn, price_info["devise"])
+    prix_fmt = format_amount(price_info["prix_actuel"], price_info["devise"], rate)
+
+    def _fmt_var(pct):
+        return f"{pct:+.1f}%" if pct is not None else "n/a"
+
+    variations = price_info["variations"]
+    var_parts = [f"{label}: {_fmt_var(variations[label])}" for label in PRICE_VARIATION_LAGS]
+    return f"{prix_fmt} (variation {', '.join(var_parts)})"
+
+
 def load_display_name(conn, ticker):
     """nom_entreprise (yfinance longName/shortName) in priority, falling back
     to `nom` (scraped from the index constituent page at universe-build time)
@@ -414,7 +479,10 @@ SYSTEM_PROMPT_ARGUMENT = (
     "1. Situation de l'entreprise : ce que les scores fournis (prix/"
     "valorisation, technique, fondamental reel, risque) signifient "
     "concretement pour quelqu'un qui envisage d'investir -- pas une "
-    "enumeration mecanique des chiffres, explique ce qu'ils impliquent.\n"
+    "enumeration mecanique des chiffres, explique ce qu'ils impliquent. Si "
+    "un prix actuel et une variation recente sont fournis ci-dessous, "
+    "mentionne-les naturellement dans ce paragraphe (jamais un chiffre qui "
+    "n'y figure pas).\n"
     "2. Contexte macro-economique ou sectoriel -- UNIQUEMENT si une chaine "
     "causale ou une news importante est fournie ci-dessous ; sinon, limite "
     "ce paragraphe aux entreprises liees deja fournies (concurrents/"
@@ -540,7 +608,7 @@ def load_macro_context(conn, ticker):
     return None
 
 
-def build_argument_prompt(signal, macro_context=None):
+def build_argument_prompt(signal, macro_context=None, conn=None):
     lines = [
         f"Entreprise : {signal['nom_affiche']} ({signal['ticker']})",
         f"Score global : {signal['score_global']:.1f}/100 "
@@ -548,6 +616,14 @@ def build_argument_prompt(signal, macro_context=None):
         f"Detail des composantes : {signal['explication']}",
         f"Niveau de risque retenu : {signal['risque']}",
     ]
+    # Real price + variation, exactly as computed/shown in the structured
+    # metrics -- given here so the LLM can refer to it naturally instead of
+    # guessing or omitting it; conn=None (no caller-supplied connection)
+    # skips this line gracefully rather than crashing.
+    if conn is not None and signal.get("prix"):
+        price_line = format_price_line(conn, signal["prix"])
+        if price_line:
+            lines.append(f"Prix actuel et variation recente : {price_line}")
     if signal.get("conflit_composantes"):
         lines.append(
             "Attention : contradiction detectee entre composantes structurelles "
@@ -599,7 +675,7 @@ def generate_argued_text(client, conn, signal):
         temperature=0.4,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT_ARGUMENT},
-            {"role": "user", "content": build_argument_prompt(signal, macro_context)},
+            {"role": "user", "content": build_argument_prompt(signal, macro_context, conn=conn)},
         ],
     )
     text = completion.choices[0].message.content
@@ -782,6 +858,7 @@ def build_signal(conn, row, graph, relations):
     risk = compute_risk(volatility, row["confiance"], conflict)
     watch = companies_to_watch(graph, relations, row["ticker"])
     nom_affiche = load_display_name(conn, row["ticker"])
+    prix = compute_price_variation(conn, row["ticker"])
 
     return {
         "ticker": row["ticker"],
@@ -799,6 +876,7 @@ def build_signal(conn, row, graph, relations):
         "volatilite": volatility,
         "horizon": HORIZON_LABEL,
         "entreprises_a_surveiller": watch,
+        "prix": prix,
     }
 
 

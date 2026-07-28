@@ -476,6 +476,25 @@ def render_chart(symbol):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def _price_display(conn, signal):
+    """(price_str, variation_str) for a build_signal() dict's "prix" entry --
+    price converted to EUR (display-only, same convention as render_chart's
+    "Current price" metric: price_history itself is never touched), 1j/7j/30j
+    variations shown as a compact string ("1j: +0.8% | 7j: +2.1% | 30j: n/a").
+    ("n/a", None) if this ticker has no price data at all."""
+    prix = signal.get("prix")
+    if not prix:
+        return "n/a", None
+    devise = prix["devise"]
+    rate = get_rate_to_eur(conn, devise)
+    price_str = format_amount(prix["prix_actuel"], devise, rate)
+    parts = []
+    for label in ("1j", "7j", "30j"):
+        v = prix["variations"].get(label)
+        parts.append(f"{label}: {v:+.1f}%" if v is not None else f"{label}: n/a")
+    return price_str, " | ".join(parts)
+
+
 def _entreprises_a_surveiller_block(surveiller):
     st.markdown(term_span("Entreprises a surveiller", "Entreprises a surveiller"),
                 unsafe_allow_html=True)
@@ -538,10 +557,13 @@ def render_ai_analysis_section(symbol):
                     )
 
         with st.expander("Detail des composantes (donnees structurees)"):
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             c1.metric("Score ajuste", f"{signal['score_ajuste']:.1f}",
                       help=GLOSSAIRE["Score ajuste"])
             c2.metric("Confiance", f"{signal['confiance']:.0f}%", help=GLOSSAIRE["Confiance"])
+            prix_str, variation_str = _price_display(conn, signal)
+            c3.metric("Prix actuel", prix_str, variation_str, delta_color="off",
+                      help=GLOSSAIRE["Variation"])
             st.markdown(highlight_terms(signal["explication"]), unsafe_allow_html=True)
             risk_tip = html.escape(GLOSSAIRE["Risque"], quote=True)
             conflict_note = (" - composantes structurelles en contradiction"
@@ -611,6 +633,102 @@ def tonalite_color(tonalite):
     return "#6b7280"  # neutre
 
 
+def _price_before_after_news(conn, ticker, published_at):
+    """Price just before a news's publication (last close ON OR BEFORE that
+    date) and the most recent close available now (i.e. "after", however
+    much time has actually passed since) -- with the % variation between
+    them. Returns None if there's no close AT OR BEFORE the news date at
+    all (news older than price_history's coverage), or a dict with
+    variation_pct=None if there's simply no close strictly AFTER the "before"
+    one yet (news too recent for anything to have changed since) -- the
+    caller must show "donnee insuffisante" for that case, never compute a
+    variation against the exact same price twice."""
+    if not published_at:
+        return None
+    news_date = str(published_at)[:10]
+
+    before_row = conn.execute(
+        "SELECT date, close FROM price_history WHERE ticker = ? AND close IS NOT NULL "
+        "AND date <= ? ORDER BY date DESC LIMIT 1",
+        (ticker, news_date),
+    ).fetchone()
+    if not before_row:
+        return None
+    date_before, price_before = before_row
+
+    after_row = conn.execute(
+        "SELECT date, close FROM price_history WHERE ticker = ? AND close IS NOT NULL "
+        "ORDER BY date DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    date_after, price_after = after_row if after_row else (None, None)
+
+    if not date_after or date_after <= date_before or not price_before:
+        return {"date_before": date_before, "price_before": price_before,
+                "date_after": None, "price_after": None, "variation_pct": None}
+
+    variation_pct = (price_after - price_before) / price_before * 100.0
+    return {"date_before": date_before, "price_before": price_before,
+            "date_after": date_after, "price_after": price_after,
+            "variation_pct": variation_pct}
+
+
+def _format_price_before_after(conn, ticker, price_info):
+    """Human-readable "172.34 EUR (12/07) -> 180.10 EUR (27/07), +4.5%" line,
+    or "Donnee insuffisante (...)" with a plain-language reason -- never a
+    silently wrong or half-computed number."""
+    devise_row = conn.execute("SELECT devise FROM universe WHERE ticker = ?", (ticker,)).fetchone()
+    devise = devise_row[0] if devise_row and devise_row[0] else "USD"
+    rate = get_rate_to_eur(conn, devise)
+
+    if price_info is None:
+        return ("Donnee insuffisante : aucun prix disponible avant ou a la "
+                "date de cette news.")
+    if price_info["variation_pct"] is None:
+        avant = format_amount(price_info["price_before"], devise, rate)
+        return (f"Donnee insuffisante : dernier prix disponible {avant} "
+                f"({price_info['date_before']}), rien de plus recent pour "
+                f"mesurer une evolution depuis cette news.")
+
+    avant = format_amount(price_info["price_before"], devise, rate)
+    apres = format_amount(price_info["price_after"], devise, rate)
+    return (f"{avant} ({price_info['date_before']}) -> {apres} "
+            f"({price_info['date_after']}), {price_info['variation_pct']:+.1f}%")
+
+
+def _news_summary_paragraph(row):
+    """A short multi-sentence paragraph assembled from ALREADY-STORED
+    news_analysis fields (importance, tonalite, impact, horizon) -- no new
+    LLM call, purely a clearer write-up of the exact same analysis instead
+    of a single terse sentence."""
+    company = row["company"] or row["ticker"]
+    sector = row["sector"]
+    importance = int(row["importance"]) if pd.notna(row["importance"]) else None
+    tonalite = str(row["tonalite"] or "neutre").lower()
+    impact = row["impact"]
+    horizon = row["horizon"]
+
+    sentences = []
+    if importance is not None and importance >= 8:
+        sentences.append(
+            f"Cette news est jugee tres importante ({importance}/10) pour {company}"
+            + (f", dans le secteur {sector}" if sector else "") + "."
+        )
+    elif importance is not None:
+        sentences.append(
+            f"Importance evaluee a {importance}/10 pour {company}"
+            + (f" ({sector})" if sector else "") + "."
+        )
+    tonalite_txt = {"positive": "plutot positive", "negative": "plutot negative"}.get(
+        tonalite, "neutre")
+    sentences.append(f"La tonalite generale de cette news est {tonalite_txt}.")
+    if impact:
+        sentences.append(f"Impact identifie par l'analyse : {impact}.")
+    if horizon:
+        sentences.append(f"Horizon concerne : {horizon}.")
+    return " ".join(sentences)
+
+
 def render_news_page():
     st.subheader("News & Analyse IA")
     news, error = load_news()
@@ -630,33 +748,44 @@ def render_news_page():
     sub = news[news["ticker"] == ticker].reset_index(drop=True)
     st.caption(f"{len(sub)} news analysees pour {ticker}")
 
-    for _, r in sub.iterrows():
-        color = tonalite_color(r["tonalite"])
-        badge = (
-            f"<span style='background:{color};color:white;padding:2px 10px;"
-            f"border-radius:12px;font-size:0.8em'>{r['tonalite']}</span>"
-        )
-        importance = int(r["importance"]) if pd.notna(r["importance"]) else "?"
-        confidence = int(r["confidence"]) if pd.notna(r["confidence"]) else "?"
-        title = r["title"]
-        title_html = (
-            f"<a href='{r['url']}' target='_blank'>{title}</a>"
-            if r["url"] else title
-        )
-        st.markdown(
-            f"{badge}&nbsp;&nbsp;<b>Importance {importance}/10</b>"
-            f"&nbsp;&nbsp;&middot;&nbsp;&nbsp;confiance {confidence}%<br>"
-            f"{title_html}",
-            unsafe_allow_html=True,
-        )
-        meta = " &middot; ".join(
-            str(x) for x in [r["company"], r["sector"], r["horizon"],
-                             f"source: {r['source']}"] if x
-        )
-        st.caption(meta)
-        if r["impact"]:
-            st.write(r["impact"])
-        st.divider()
+    if not os.path.exists(DB_PATH):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        for _, r in sub.iterrows():
+            color = tonalite_color(r["tonalite"])
+            badge = (
+                f"<span style='background:{color};color:white;padding:2px 10px;"
+                f"border-radius:12px;font-size:0.8em'>{r['tonalite']}</span>"
+            )
+            importance = int(r["importance"]) if pd.notna(r["importance"]) else "?"
+            confidence = int(r["confidence"]) if pd.notna(r["confidence"]) else "?"
+            title = r["title"]
+            title_html = (
+                f"<a href='{r['url']}' target='_blank'>{title}</a>"
+                if r["url"] else title
+            )
+            st.markdown(
+                f"{badge}&nbsp;&nbsp;<b>Importance {importance}/10</b>"
+                f"&nbsp;&nbsp;&middot;&nbsp;&nbsp;confiance {confidence}%<br>"
+                f"{title_html}",
+                unsafe_allow_html=True,
+            )
+            meta = " &middot; ".join(
+                str(x) for x in [r["company"], r["sector"], r["horizon"],
+                                 f"source: {r['source']}"] if x
+            )
+            st.caption(meta)
+
+            st.markdown(highlight_terms(_news_summary_paragraph(r)), unsafe_allow_html=True)
+
+            price_info = _price_before_after_news(conn, ticker, r["published_at"])
+            price_line = _format_price_before_after(conn, ticker, price_info)
+            st.caption(f"Prix avant/apres cette news : {price_line}")
+
+            st.divider()
+    finally:
+        conn.close()
 
 
 # --- Knowledge graph -------------------------------------------------------
@@ -1031,6 +1160,12 @@ def load_daily_summary():
         conn = sqlite3.connect(DB_PATH)
         signals, dates_by_priority, n_candidates = build_daily_summary(conn)
         add_argued_texts(conn, signals)
+        # Precomputed here (conn still open) rather than at render time:
+        # get_rate_to_eur needs a live connection, and this is the loader's
+        # own cache scope (@st.cache_data below) -- the render function
+        # never needs to open a second connection just for currency.
+        for s in signals:
+            s["prix_affiche"], s["variation_affichee"] = _price_display(conn, s)
         conn.close()
     except sqlite3.Error as exc:
         return [], {}, 0, str(exc)
@@ -1073,11 +1208,13 @@ def render_daily_summary_page():
 
     for rank, s in enumerate(signals, start=1):
         with st.container(border=True):
-            c1, c2, c3 = st.columns([2, 1, 1])
+            c1, c2, c3, c4 = st.columns([2, 1, 1, 1.4])
             c1.markdown(f"### #{rank}  {s['ticker']} -- {s['nom_affiche']}")
             c2.metric("Score ajuste", f"{s['score_ajuste']:.1f}",
                       help=GLOSSAIRE["Score ajuste"])
             c3.metric("Confiance", f"{s['confiance']:.0f}%", help=GLOSSAIRE["Confiance"])
+            c4.metric("Prix actuel", s["prix_affiche"], s.get("variation_affichee"),
+                      delta_color="off", help=GLOSSAIRE["Variation"])
 
             if s.get("texte_argumente"):
                 st.markdown(f"##### {highlight_terms(s['texte_argumente'])}",

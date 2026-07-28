@@ -108,6 +108,12 @@ GLOSSAIRE = {
         "Une volatilite elevee veut dire que le prix peut bouger fortement "
         "dans un sens comme dans l'autre."
     ),
+    "Variation": (
+        "Evolution du prix entre aujourd'hui et il y a 1, 7 ou 30 jours de "
+        "bourse, en pourcentage. Un + veut dire que le prix a monte depuis "
+        "cette date, un - qu'il a baisse. « n/a » signifie que l'historique "
+        "disponible ne remonte pas assez loin pour calculer cette periode."
+    ),
     "Risque": (
         "Niveau de risque estime (Faible / Modere / Eleve), calcule a "
         "partir de la volatilite, du niveau de confiance des donnees, et "
