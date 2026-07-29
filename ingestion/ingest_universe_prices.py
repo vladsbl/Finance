@@ -47,6 +47,7 @@ except ImportError:
 configure_ca_bundle(DATA_DIR)
 
 import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 import yfinance as yf  # noqa: E402
 
 logging.basicConfig(
@@ -140,9 +141,17 @@ def download_batch(tickers, period, retries):
     return None
 
 
-def _ticker_frame(data, ticker, single):
-    """Extract a single ticker's OHLCV frame from a yf.download result."""
-    if single:
+def _ticker_frame(data, ticker):
+    """Extract a single ticker's OHLCV frame from a yf.download result.
+    yf.download(..., group_by="ticker") returns MultiIndex columns
+    (ticker, field) regardless of how many tickers were requested -- a
+    single-ticker call still comes back MultiIndex-shaped, not flat. The
+    unwrap must therefore be driven by the actual column shape (is this a
+    MultiIndex?), never by len(tickers): treating a 1-ticker batch as
+    already-flat silently left every OHLCV value keyed under a tuple like
+    ('A4XA.F', 'Close') instead of 'Close', so r.get('Close') always
+    returned None and every row was upserted as NULL, with no error."""
+    if not isinstance(data.columns, pd.MultiIndex):
         return data
     try:
         if ticker in data.columns.get_level_values(0):
@@ -154,10 +163,9 @@ def _ticker_frame(data, ticker, single):
 
 def store_batch(conn, data, tickers):
     """Upsert every ticker's rows from a batch. Returns (rows, tickers_ok)."""
-    single = len(tickers) == 1
     total_rows, ok = 0, 0
     for ticker in tickers:
-        frame = _ticker_frame(data, ticker, single)
+        frame = _ticker_frame(data, ticker)
         if frame is None or frame.empty:
             continue
         rows = []
