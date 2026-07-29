@@ -173,14 +173,31 @@ def load_total_failures(conn):
 
 # --- Validation ----------------------------------------------------------------
 
+# A 5-day window let a thin/near-delisted cross-listing through: A4XA.F
+# (a Frankfurt listing for American Homes 4 Rent) had enough stale data to
+# pass a 5-day check, but ingestion/ingest_universe_prices.py's real 1-year
+# fetch failed immediately after ("possibly delisted; no price data found").
+# 1 month with a minimum non-null-Close row count catches that (a ticker
+# with essentially no real trading activity won't clear the threshold)
+# while still giving a genuinely recently-listed ticker (already trading
+# most sessions of the last month) room to pass.
+MIN_TRADING_DAYS = 15
+
+
 def validate_ticker(candidate):
-    """True if yfinance returns real, non-empty price history for candidate."""
+    """True if yfinance returns at least MIN_TRADING_DAYS distinct trading
+    days with a non-null Close over the last month for candidate -- a
+    stronger liquidity bar than "any non-empty history", which a thin or
+    near-delisted listing can still clear (see MIN_TRADING_DAYS docstring
+    above)."""
     try:
-        hist = _with_retry(lambda: yf.Ticker(candidate).history(period="5d"))
+        hist = _with_retry(lambda: yf.Ticker(candidate).history(period="1mo"))
     except Exception as exc:  # noqa: BLE001
         logger.debug("%s: validation failed (%s)", candidate, exc)
         return False
-    return hist is not None and not hist.empty
+    if hist is None or hist.empty or "Close" not in hist:
+        return False
+    return int(hist["Close"].notna().sum()) >= MIN_TRADING_DAYS
 
 
 # --- Category A: mechanical Nordic class-letter hyphen ------------------------
