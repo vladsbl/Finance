@@ -13,3 +13,5 @@ lxml
 pytest
 certifi==2026.6.17
 httpx==0.28.1
+fastapi
+uvicorn[standard]
