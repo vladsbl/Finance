@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+/* Deliberately minimal for this first page: mechanics before style (see
+   task instructions -- the full "Jarvis" theme from the Streamlit
+   dashboard comes later, once the React <-> FastAPI plumbing is proven). */
+body {
+  margin: 0;
+}

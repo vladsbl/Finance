@@ -1,0 +1,50 @@
+// Mirrors the JSON shapes returned by api/routers/daily_summary.py exactly
+// -- field names kept in French/snake_case to match the backend 1:1
+// (reasoning/daily_summary.py's build_signal()), rather than translating
+// them, so a backend field rename is a single obvious diff here too.
+
+export interface PriceVariations {
+  '1j': number | null
+  '7j': number | null
+  '30j': number | null
+}
+
+export interface PriceInfo {
+  prix_actuel: number
+  devise: string
+  variations: PriceVariations
+}
+
+export interface Signal {
+  ticker: string
+  nom_affiche: string
+  score_global: number
+  confiance: number
+  score_ajuste: number
+  score_prix_valorisation: number | null
+  score_technique: number | null
+  score_news: number | null
+  score_fondamental_reel: number | null
+  explication: string
+  risque: string
+  conflit_composantes: boolean
+  volatilite: number | null
+  horizon: string
+  entreprises_a_surveiller: Record<string, string[]> | null
+  prix: PriceInfo | null
+}
+
+export interface DailySummaryResponse {
+  signals: Signal[]
+  dates_by_priority: Record<string, string>
+  n_candidates: number
+  staleness: string | null
+}
+
+export type ArguedTextSource = 'cache' | 'generated' | 'unavailable'
+
+export interface ArguedTextResponse {
+  ticker: string
+  texte_argumente: string | null
+  source: ArguedTextSource
+}
