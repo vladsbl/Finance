@@ -1448,7 +1448,7 @@ def render_causal_reasoning_page():
 CORRELATIONS_SQL = """
 SELECT ticker_source, ticker_target, relation_type, source_table, lag,
        lag_direction, coefficient, p_value, p_value_corrigee, n_observations,
-       methode, correction, created_at
+       methode, correction, meme_marche, created_at
 FROM correlations_discovered
 ORDER BY ABS(coefficient) DESC;
 """
@@ -1531,6 +1531,18 @@ def render_correlations_page():
                 f"Relation d'origine : {row['relation_type']} "
                 f"(source : {'Knowledge Graph valide' if row['source_table'] == 'relations' else row['source_table']})"
             )
+
+            if row["lag"] != 0 and not row["meme_marche"]:
+                st.warning(
+                    "⚠️ Decalage inter-marche (probable artefact d'horaire) -- "
+                    f"{row['ticker_source']} et {row['ticker_target']} cotent sur des "
+                    "places boursieres differentes. Un lag non nul entre deux marches "
+                    "dans des fuseaux horaires distincts reflete le plus souvent "
+                    "l'absorption, par le marche qui ouvre plus tard, des informations "
+                    "de la session precedente -- pas necessairement un lien economique "
+                    "retarde specifique a cette paire.",
+                    icon="⚠️",
+                )
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Coefficient (Spearman)", f"{row['coefficient']:+.3f}",

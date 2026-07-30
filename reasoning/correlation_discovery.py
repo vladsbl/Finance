@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS correlations_discovered (
     n_observations     INTEGER NOT NULL,
     methode            TEXT NOT NULL,
     correction         TEXT NOT NULL,
+    meme_marche        INTEGER NOT NULL DEFAULT 1,
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (ticker_source, ticker_target, relation_type, source_table, lag)
 );
@@ -128,19 +129,78 @@ INSERT_SQL = """
 INSERT INTO correlations_discovered
     (ticker_source, ticker_target, relation_type, source_table, lag,
      lag_direction, coefficient, p_value, p_value_corrigee, n_observations,
-     methode, correction)
+     methode, correction, meme_marche)
 VALUES
     (:ticker_source, :ticker_target, :relation_type, :source_table, :lag,
      :lag_direction, :coefficient, :p_value, :p_value_corrigee, :n_observations,
-     :methode, :correction)
+     :methode, :correction, :meme_marche)
 ON CONFLICT(ticker_source, ticker_target, relation_type, source_table, lag)
 DO UPDATE SET
     coefficient      = excluded.coefficient,
     p_value          = excluded.p_value,
     p_value_corrigee = excluded.p_value_corrigee,
+    meme_marche      = excluded.meme_marche,
     n_observations   = excluded.n_observations,
     created_at       = CURRENT_TIMESTAMP;
 """
+
+
+# --- Market classification -----------------------------------------------------
+#
+# A lag!=0 correlation between two tickers on DIFFERENT exchanges is
+# suspect for a reason that has nothing to do with any real business link:
+# markets in different time zones close at different points in the
+# calendar day, so "yesterday's US close correlating with today's Tokyo
+# close" is very often just the foreign market absorbing the same overnight
+# information the US session already priced in -- a market-microstructure
+# artifact, not a delayed reaction specific to that pair. Same-exchange
+# pairs don't have this confound, so a lag!=0 result there is a much better
+# candidate for the kind of "hidden" economic signal this module looks for.
+# Suffix -> market label mirrors the exchange-suffix convention already used
+# elsewhere in this codebase (see universe/fix_ticker_mapping.py's
+# NORDIC_SUFFIXES); no suffix at all means NYSE/NASDAQ (the large majority
+# of `universe`).
+SUFFIX_MARKET = {
+    "MU": "Allemagne (Munich)", "DE": "Allemagne (Xetra)", "DU": "Allemagne (Dusseldorf)",
+    "HA": "Allemagne (Hambourg)", "F": "Allemagne (Francfort)", "BE": "Allemagne (Berlin)",
+    "SG": "Allemagne (Stuttgart)",
+    "NS": "Inde (NSE)", "BO": "Inde (BSE)",
+    "T": "Japon (Tokyo)",
+    "KS": "Coree du Sud (KOSPI)", "KQ": "Coree du Sud (KOSDAQ)",
+    "SS": "Chine (Shanghai)", "SZ": "Chine (Shenzhen)",
+    "L": "Royaume-Uni (LSE)",
+    "SW": "Suisse (SIX)",
+    "PA": "France (Euronext Paris)",
+    "MI": "Italie (Borsa Milano)",
+    "AS": "Pays-Bas (Euronext Amsterdam)",
+    "ST": "Suede (Nasdaq Stockholm)", "OL": "Norvege (Oslo)", "CO": "Danemark (Copenhague)",
+    "HE": "Finlande (Helsinki)",
+    "AT": "Grece (Athenes)",
+    "BA": "Argentine (BCBA)",
+    "SA": "Bresil (B3)",
+    "HK": "Hong Kong (HKEX)",
+    "VI": "Autriche (Vienne)",
+    "JO": "Afrique du Sud (JSE)",
+    "AE": "Emirats (ADX/DFM)",
+}
+
+
+def classify_market(ticker):
+    """Exchange market label deduced purely from the ticker's own suffix --
+    no DB lookup needed. A ticker with no "." suffix (the large majority of
+    `universe`, including share-class tickers like "BRK-B") is NYSE/NASDAQ.
+    An unrecognised suffix still gets its own distinct label (rather than
+    silently falling back to "same as everything else"), so two tickers on
+    two DIFFERENT unmapped exchanges are still correctly treated as
+    different markets."""
+    if "." not in ticker:
+        return "US (NYSE/NASDAQ)"
+    suffix = ticker.rsplit(".", 1)[-1].upper()
+    return SUFFIX_MARKET.get(suffix, f"Autre (suffixe .{suffix})")
+
+
+def is_same_market(ticker_a, ticker_b):
+    return classify_market(ticker_a) == classify_market(ticker_b)
 
 
 # --- Pair loading --------------------------------------------------------------
@@ -280,6 +340,7 @@ def run_discovery(conn, pairs, source_table, min_observations=MIN_OBSERVATIONS,
                 "coefficient": coefficient,
                 "p_value": p_value,
                 "n_observations": n_obs,
+                "meme_marche": is_same_market(source_ticker, target_ticker),
             })
 
     if not all_results:
@@ -303,8 +364,31 @@ def run_discovery(conn, pairs, source_table, min_observations=MIN_OBSERVATIONS,
     return all_results
 
 
+def ensure_meme_marche_column(conn):
+    """Backfills meme_marche onto a correlations_discovered table created
+    before this column existed -- CREATE TABLE IF NOT EXISTS is a no-op on
+    an already-existing table, so a plain ALTER TABLE is needed for rows
+    stored by an earlier run to ever get a real (non-default) value."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(correlations_discovered)")}
+    if "meme_marche" in cols:
+        return
+    conn.execute(
+        "ALTER TABLE correlations_discovered ADD COLUMN meme_marche INTEGER NOT NULL DEFAULT 1"
+    )
+    conn.commit()
+    rows = conn.execute(
+        "SELECT id, ticker_source, ticker_target FROM correlations_discovered"
+    ).fetchall()
+    conn.executemany(
+        "UPDATE correlations_discovered SET meme_marche = ? WHERE id = ?",
+        [(int(is_same_market(src, tgt)), row_id) for row_id, src, tgt in rows],
+    )
+    conn.commit()
+
+
 def store_significant(conn, results):
     conn.execute(CREATE_TABLE_SQL)
+    ensure_meme_marche_column(conn)
     conn.commit()
     to_store = [r for r in results if r["significatif"]]
     for r in to_store:

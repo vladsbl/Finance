@@ -12,7 +12,9 @@ to statut='valide' only."""
 
 import sqlite3
 
-from reasoning.correlation_discovery import load_pairs_from_relations_generated
+from reasoning.correlation_discovery import (
+    classify_market, is_same_market, load_pairs_from_relations_generated,
+)
 
 CREATE_SQL = """
 CREATE TABLE relations_generated (
@@ -79,3 +81,46 @@ def test_returns_empty_when_nothing_validated():
         ("TSLA", "concurrent", "GM", "GM", "a_valider"),
     ])
     assert load_pairs_from_relations_generated(conn) == []
+
+
+# --- classify_market / is_same_market -----------------------------------------
+#
+# Motivated by a real finding: 14 of 31 lag!=0 correlations discovered on the
+# expanded Knowledge Graph turned out to pair a US ticker against a foreign
+# one (e.g. ALB -> QYM.MU), 13 of them at exactly lag=+1 -- the signature of
+# a time-zone/closing-time artifact (the foreign market absorbing the prior
+# US session's overnight information), not a genuine delayed economic
+# reaction specific to that pair.
+
+def test_classify_market_plain_ticker_is_us():
+    assert classify_market("AAPL") == "US (NYSE/NASDAQ)"
+
+
+def test_classify_market_share_class_ticker_is_still_us():
+    # BRK-B has a hyphen but no "." suffix -- still a plain NYSE/NASDAQ ticker.
+    assert classify_market("BRK-B") == "US (NYSE/NASDAQ)"
+
+
+def test_classify_market_known_suffixes():
+    assert classify_market("QYM.MU") == "Allemagne (Munich)"
+    assert classify_market("7203.T") == "Japon (Tokyo)"
+    assert classify_market("INFY.NS") == "Inde (NSE)"
+    assert classify_market("005850.KS") == "Coree du Sud (KOSPI)"
+
+
+def test_classify_market_unknown_suffix_gets_its_own_distinct_label():
+    # Two DIFFERENT unmapped suffixes must not collapse into the same label
+    # (which would wrongly mark them as "same market").
+    assert classify_market("XXX.ZZ") != classify_market("XXX.QQ")
+
+
+def test_is_same_market_true_for_two_us_tickers():
+    assert is_same_market("AMD", "MSFT") is True
+
+
+def test_is_same_market_false_for_us_vs_foreign():
+    assert is_same_market("ALB", "QYM.MU") is False
+
+
+def test_is_same_market_true_for_two_tickers_on_same_foreign_exchange():
+    assert is_same_market("7203.T", "6301.T") is True
