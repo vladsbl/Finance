@@ -370,3 +370,147 @@ def test_highlight_terms_wraps_known_terms_in_tooltip_spans():
 
     escaped = highlight_terms("<script>alert(1)</script> Confiance 50%")
     assert "<script>" not in escaped
+
+
+# --- Correlations page: mirror-dedup / suspect-relation exclusion ------------
+#
+# Found during manual review of the 17 same-market lag!=0 correlations
+# (2026-07-29): the Knowledge Graph often lists a relationship from both
+# sides (e.g. DOW->LYB and LYB->DOW, both 'concurrent'), so
+# correlation_discovery.py stores two rows for what is statistically the
+# same lagged fact -- 56 such mirror groups across all 608 stored
+# correlations, not just DOW/LYB.
+
+def _corr_row(source, target, relation_type, lag, lag_direction, coefficient=0.2):
+    return {
+        "ticker_source": source, "ticker_target": target,
+        "relation_type": relation_type, "lag": lag,
+        "lag_direction": lag_direction, "coefficient": coefficient,
+        "p_value_corrigee": 0.02, "n_observations": 240,
+        "meme_marche": 1, "nom_source": source, "nom_target": target,
+    }
+
+
+def test_dedupe_mirror_correlations_collapses_both_kg_directions():
+    import dashboard.app as app
+    rows = [
+        _corr_row("DOW", "LYB", "concurrent", 10, "source_precede_target"),
+        _corr_row("LYB", "DOW", "concurrent", -10, "target_precede_source"),
+    ]
+    result = app._dedupe_mirror_correlations(rows)
+    assert len(result) == 1
+
+
+def test_dedupe_mirror_correlations_keeps_distinct_pairs_separate():
+    import dashboard.app as app
+    rows = [
+        _corr_row("DOW", "LYB", "concurrent", 10, "source_precede_target"),
+        _corr_row("AMD", "INTC", "concurrent", -3, "target_precede_source"),
+    ]
+    result = app._dedupe_mirror_correlations(rows)
+    assert len(result) == 2
+
+
+def test_dedupe_mirror_correlations_merges_distinct_relation_types():
+    import dashboard.app as app
+    rows = [
+        _corr_row("AMP", "SSNC", "fournisseur", -5, "target_precede_source"),
+        _corr_row("SSNC", "AMP", "client", 5, "source_precede_target"),
+    ]
+    result = app._dedupe_mirror_correlations(rows)
+    assert len(result) == 1
+    assert "fournisseur" in result[0]["relation_type"]
+    assert "client" in result[0]["relation_type"]
+
+
+def test_dedupe_mirror_correlations_collapses_simultaneous_pair_either_order():
+    import dashboard.app as app
+    rows = [
+        _corr_row("MLM", "VMC", "concurrent", 0, "simultane"),
+        _corr_row("VMC", "MLM", "concurrent", 0, "simultane"),
+    ]
+    result = app._dedupe_mirror_correlations(rows)
+    assert len(result) == 1
+
+
+def test_filter_suspect_relations_excludes_known_backwards_edges():
+    import dashboard.app as app
+    rows = [
+        _corr_row("CBOE", "AMZN", "fournisseur", 1, "source_precede_target"),
+        _corr_row("TTWO", "NVDA", "fournisseur", 10, "source_precede_target"),
+        _corr_row("AMD", "INTC", "concurrent", -3, "target_precede_source"),
+    ]
+    kept, excluded = app._filter_suspect_relations(rows)
+    assert len(kept) == 1 and kept[0]["ticker_source"] == "AMD"
+    assert len(excluded) == 2
+
+
+def _run_page_correlations_with_badges():
+    # Covers all four review outcomes from the 2026-07-29 manual pass over
+    # the 17 same-market lag!=0 correlations in one page render: a KG mirror
+    # duplicate (DOW/LYB, both directions), a suspect relation to exclude
+    # (TTWO->NVDA), a known mean-reversion pair (ESS/AVB), and a plain
+    # lag!=0 same-market row that should just get the general p-value
+    # caution note (AMD/INTC).
+    import dashboard.app as app
+
+    def _stub():
+        rows = [
+            {"ticker_source": "DOW", "ticker_target": "LYB", "relation_type": "concurrent",
+             "source_table": "relations", "lag": 10, "lag_direction": "source_precede_target",
+             "coefficient": -0.200, "p_value": 0.01, "p_value_corrigee": 0.02,
+             "n_observations": 240, "methode": "spearman", "correction": "fdr_bh",
+             "meme_marche": 1, "nom_source": "Dow Inc.", "nom_target": "LyondellBasell"},
+            {"ticker_source": "LYB", "ticker_target": "DOW", "relation_type": "concurrent",
+             "source_table": "relations", "lag": -10, "lag_direction": "target_precede_source",
+             "coefficient": -0.200, "p_value": 0.01, "p_value_corrigee": 0.02,
+             "n_observations": 240, "methode": "spearman", "correction": "fdr_bh",
+             "meme_marche": 1, "nom_source": "LyondellBasell", "nom_target": "Dow Inc."},
+            {"ticker_source": "TTWO", "ticker_target": "NVDA", "relation_type": "fournisseur",
+             "source_table": "relations", "lag": 10, "lag_direction": "source_precede_target",
+             "coefficient": 0.194, "p_value": 0.02, "p_value_corrigee": 0.026,
+             "n_observations": 240, "methode": "spearman", "correction": "fdr_bh",
+             "meme_marche": 1, "nom_source": "Take-Two", "nom_target": "NVIDIA"},
+            {"ticker_source": "ESS", "ticker_target": "AVB", "relation_type": "concurrent",
+             "source_table": "relations", "lag": -1, "lag_direction": "target_precede_source",
+             "coefficient": -0.201, "p_value": 0.01, "p_value_corrigee": 0.015,
+             "n_observations": 249, "methode": "spearman", "correction": "fdr_bh",
+             "meme_marche": 1, "nom_source": "Essex Property Trust", "nom_target": "AvalonBay"},
+            {"ticker_source": "AMD", "ticker_target": "INTC", "relation_type": "concurrent",
+             "source_table": "relations", "lag": -3, "lag_direction": "target_precede_source",
+             "coefficient": 0.201, "p_value": 0.01, "p_value_corrigee": 0.016,
+             "n_observations": 247, "methode": "spearman", "correction": "fdr_bh",
+             "meme_marche": 1, "nom_source": "AMD", "nom_target": "Intel"},
+        ]
+        return rows, None
+
+    app.load_correlations = _stub
+    app.page_correlations()
+
+
+def test_page_correlations_applies_dedup_exclusion_and_badges():
+    at = AppTest.from_function(_run_page_correlations_with_badges, default_timeout=60).run()
+    assert not at.exception, f"page_correlations raised: {list(at.exception)}"
+
+    headers = [m.value for m in at.markdown]
+    joined_headers = " ".join(headers)
+    assert joined_headers.count("DOW") == 1 or joined_headers.count("LYB") == 1, (
+        "DOW/LYB mirror pair must be collapsed to a single displayed row, "
+        f"got headers: {headers}"
+    )
+    assert "TTWO" not in joined_headers and "NVDA" not in joined_headers, (
+        f"Suspect relation TTWO->NVDA must be excluded from display, got: {headers}"
+    )
+
+    warnings = [w.value for w in at.warning]
+    assert any("retour a la moyenne" in w for w in warnings), (
+        f"Expected the mean-reversion badge for ESS/AVB, got: {warnings}"
+    )
+
+    captions = [c.value for c in at.caption]
+    assert any("prudence supplementaire" in c for c in captions), (
+        f"Expected the general lag!=0 caution note for AMD/INTC, got: {captions}"
+    )
+    assert any("exclue(s)" in c and "TTWO" in c for c in captions), (
+        f"Expected the top summary caption to mention the excluded relation, got: {captions}"
+    )

@@ -1474,6 +1474,92 @@ def load_correlations():
     return rows, None
 
 
+# Two KG relations that look economically backwards on inspection (Cboe is
+# an exchange operator, not a supplier to Amazon; Take-Two is a game
+# publisher, not a supplier to NVIDIA -- if anything the real supply
+# direction runs the other way). Found during manual review of the 17
+# same-market lag!=0 correlations on 2026-07-29: the STATISTIC isn't the
+# problem here, the underlying Knowledge Graph edge itself is suspect.
+# Excluded from display pending re-verification of relation_type/direction
+# in `relations` -- never silently "corrected" here, since that decision
+# belongs to the same human-review process used for every other KG edge.
+_SUSPECT_RELATIONS = {
+    ("CBOE", "AMZN", "fournisseur"),
+    ("TTWO", "NVDA", "fournisseur"),
+}
+
+# Same-market lag!=0 pairs where a MUCH stronger simultaneous (lag=0)
+# correlation for the identical pair is already known (ESS/AVB and ESS/EQR:
+# lag=0 coefficient ~4x the lag!=0 one) -- a classic mean-reversion pattern
+# around an already-strong lag=0 relationship, not an independent lagged
+# signal. Curated manually rather than a generic "ratio > threshold" rule:
+# several OTHER pairs in this same batch (e.g. DOW/LYB) show a similar
+# ratio and have not been reviewed for this specific interpretation yet, so
+# auto-flagging by ratio alone would apply a judgment call no one has
+# actually made for those pairs.
+_MEAN_REVERSION_PAIRS = {
+    frozenset({"ESS", "AVB"}),
+    frozenset({"ESS", "EQR"}),
+}
+
+
+def _filter_suspect_relations(rows):
+    """Drop rows whose (source, target, relation_type) is a KG edge flagged
+    as economically backwards -- see _SUSPECT_RELATIONS. Returns (kept,
+    excluded)."""
+    kept, excluded = [], []
+    for row in rows:
+        key = (row["ticker_source"], row["ticker_target"], row["relation_type"])
+        (excluded if key in _SUSPECT_RELATIONS else kept).append(row)
+    return kept, excluded
+
+
+def _dedupe_mirror_correlations(rows):
+    """Collapse KG-symmetric mirror rows into a single displayed row.
+
+    The Knowledge Graph often lists a relationship from both sides (e.g.
+    DOW->LYB AND LYB->DOW, both 'concurrent'), so correlation_discovery.py
+    tests each direction independently and stores two rows for what is
+    statistically the exact same lagged fact: "DOW leads LYB by 10 trading
+    days" is identical whether it was discovered via the DOW->LYB edge
+    (lag=+10, source_precede_target) or the LYB->DOW edge (lag=-10,
+    target_precede_source) -- same coefficient, same p-value, same n. This
+    collapses any such pair down to one row, keyed on the resolved (leading
+    ticker, lagging ticker, |lag|) fact rather than on which KG edge
+    happened to generate it, so it applies to every mirrored pair on the
+    page (56 groups / 57 extra rows found across all 608 stored
+    correlations as of 2026-07-29), not just DOW/LYB. Distinct
+    relation_type labels from merged rows are preserved (joined with " / ")
+    so the reader still sees every KG relation that justified testing the
+    pair."""
+    groups = {}
+    order = []
+    for row in rows:
+        if row["lag_direction"] == "simultane":
+            key = (frozenset({row["ticker_source"], row["ticker_target"]}), 0)
+        elif row["lag_direction"] == "source_precede_target":
+            key = ((row["ticker_source"], row["ticker_target"]), abs(row["lag"]))
+        else:
+            key = ((row["ticker_target"], row["ticker_source"]), abs(row["lag"]))
+
+        if key not in groups:
+            merged = dict(row)
+            merged["_merged_types"] = [row["relation_type"]]
+            groups[key] = merged
+            order.append(key)
+        else:
+            merged = groups[key]
+            if row["relation_type"] not in merged["_merged_types"]:
+                merged["_merged_types"].append(row["relation_type"])
+
+    result = []
+    for key in order:
+        merged = groups[key]
+        merged["relation_type"] = " / ".join(merged.pop("_merged_types"))
+        result.append(merged)
+    return result
+
+
 def _format_lag_direction(row):
     """Plain-language description of the lag/direction pair -- never uses
     "predit"/"cause" wording (see render_correlations_page's own caution
@@ -1513,12 +1599,25 @@ def render_correlations_page():
         )
         return
 
-    st.caption(
-        f"{len(correlations)} correlation(s) retenue(s) ({term_span('p-value corrigee', 'P-value')} "
-        f"&lt; 0.05, apres correction pour tests multiples), triees par force "
-        f"de correlation decroissante.",
-        unsafe_allow_html=True,
+    n_retenues = len(correlations)
+    correlations, excluded = _filter_suspect_relations(correlations)
+    correlations = _dedupe_mirror_correlations(correlations)
+
+    caption = (
+        f"{n_retenues} correlation(s) retenue(s) ({term_span('p-value corrigee', 'P-value')} "
+        f"&lt; 0.05, apres correction pour tests multiples). {len(correlations)} affichee(s) "
+        f"ci-dessous, triees par force de correlation decroissante"
     )
+    if excluded:
+        distinct_pairs = dict.fromkeys(
+            f"{r['ticker_source']}&rarr;{r['ticker_target']}" for r in excluded)
+        pairs = ", ".join(distinct_pairs)
+        caption += (
+            f" -- {len(excluded)} exclue(s) (tous lags confondus) en attente de "
+            f"re-verification du sens de la relation dans le Knowledge Graph ({pairs})"
+        )
+    caption += "."
+    st.caption(caption, unsafe_allow_html=True)
 
     for row in correlations:
         with st.container(border=True):
@@ -1532,6 +1631,7 @@ def render_correlations_page():
                 f"(source : {'Knowledge Graph valide' if row['source_table'] == 'relations' else row['source_table']})"
             )
 
+            pair_key = frozenset({row["ticker_source"], row["ticker_target"]})
             if row["lag"] != 0 and not row["meme_marche"]:
                 st.warning(
                     "⚠️ Decalage inter-marche (probable artefact d'horaire) -- "
@@ -1542,6 +1642,22 @@ def render_correlations_page():
                     "de la session precedente -- pas necessairement un lien economique "
                     "retarde specifique a cette paire.",
                     icon="⚠️",
+                )
+            elif row["lag"] != 0 and pair_key in _MEAN_REVERSION_PAIRS:
+                st.warning(
+                    "⚠️ Probable artefact de retour a la moyenne -- cette paire a deja "
+                    "une forte correlation simultanee connue (lag=0) ; ce resultat a "
+                    "lag non nul, plus faible, reflete vraisemblablement un rebond "
+                    "autour de cette relation deja identifiee plutot qu'un signal "
+                    "decale independant.",
+                    icon="⚠️",
+                )
+            elif row["lag"] != 0 and row["meme_marche"]:
+                st.caption(
+                    "ℹ️ Correlation a lag non nul : la p-value corrigee de ce type de "
+                    "resultat est en general plus proche du seuil de significativite "
+                    "(0.05) que les correlations simultanees, souvent bien plus fortes "
+                    "statistiquement -- a interpreter avec une prudence supplementaire."
                 )
 
             c1, c2, c3, c4 = st.columns(4)
