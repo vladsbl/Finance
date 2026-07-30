@@ -1474,20 +1474,6 @@ def load_correlations():
     return rows, None
 
 
-# Two KG relations that look economically backwards on inspection (Cboe is
-# an exchange operator, not a supplier to Amazon; Take-Two is a game
-# publisher, not a supplier to NVIDIA -- if anything the real supply
-# direction runs the other way). Found during manual review of the 17
-# same-market lag!=0 correlations on 2026-07-29: the STATISTIC isn't the
-# problem here, the underlying Knowledge Graph edge itself is suspect.
-# Excluded from display pending re-verification of relation_type/direction
-# in `relations` -- never silently "corrected" here, since that decision
-# belongs to the same human-review process used for every other KG edge.
-_SUSPECT_RELATIONS = {
-    ("CBOE", "AMZN", "fournisseur"),
-    ("TTWO", "NVDA", "fournisseur"),
-}
-
 # Same-market lag!=0 pairs where a MUCH stronger simultaneous (lag=0)
 # correlation for the identical pair is already known (ESS/AVB and ESS/EQR:
 # lag=0 coefficient ~4x the lag!=0 one) -- a classic mean-reversion pattern
@@ -1501,17 +1487,6 @@ _MEAN_REVERSION_PAIRS = {
     frozenset({"ESS", "AVB"}),
     frozenset({"ESS", "EQR"}),
 }
-
-
-def _filter_suspect_relations(rows):
-    """Drop rows whose (source, target, relation_type) is a KG edge flagged
-    as economically backwards -- see _SUSPECT_RELATIONS. Returns (kept,
-    excluded)."""
-    kept, excluded = [], []
-    for row in rows:
-        key = (row["ticker_source"], row["ticker_target"], row["relation_type"])
-        (excluded if key in _SUSPECT_RELATIONS else kept).append(row)
-    return kept, excluded
 
 
 def _dedupe_mirror_correlations(rows):
@@ -1600,24 +1575,15 @@ def render_correlations_page():
         return
 
     n_retenues = len(correlations)
-    correlations, excluded = _filter_suspect_relations(correlations)
     correlations = _dedupe_mirror_correlations(correlations)
 
-    caption = (
+    st.caption(
         f"{n_retenues} correlation(s) retenue(s) ({term_span('p-value corrigee', 'P-value')} "
         f"&lt; 0.05, apres correction pour tests multiples). {len(correlations)} affichee(s) "
-        f"ci-dessous, triees par force de correlation decroissante"
+        f"ci-dessous (paires symetriques du Knowledge Graph fusionnees en une seule "
+        f"ligne), triees par force de correlation decroissante.",
+        unsafe_allow_html=True,
     )
-    if excluded:
-        distinct_pairs = dict.fromkeys(
-            f"{r['ticker_source']}&rarr;{r['ticker_target']}" for r in excluded)
-        pairs = ", ".join(distinct_pairs)
-        caption += (
-            f" -- {len(excluded)} exclue(s) (tous lags confondus) en attente de "
-            f"re-verification du sens de la relation dans le Knowledge Graph ({pairs})"
-        )
-    caption += "."
-    st.caption(caption, unsafe_allow_html=True)
 
     for row in correlations:
         with st.container(border=True):

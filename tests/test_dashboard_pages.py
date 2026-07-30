@@ -433,25 +433,19 @@ def test_dedupe_mirror_correlations_collapses_simultaneous_pair_either_order():
     assert len(result) == 1
 
 
-def test_filter_suspect_relations_excludes_known_backwards_edges():
-    import dashboard.app as app
-    rows = [
-        _corr_row("CBOE", "AMZN", "fournisseur", 1, "source_precede_target"),
-        _corr_row("TTWO", "NVDA", "fournisseur", 10, "source_precede_target"),
-        _corr_row("AMD", "INTC", "concurrent", -3, "target_precede_source"),
-    ]
-    kept, excluded = app._filter_suspect_relations(rows)
-    assert len(kept) == 1 and kept[0]["ticker_source"] == "AMD"
-    assert len(excluded) == 2
-
-
 def _run_page_correlations_with_badges():
-    # Covers all four review outcomes from the 2026-07-29 manual pass over
-    # the 17 same-market lag!=0 correlations in one page render: a KG mirror
-    # duplicate (DOW/LYB, both directions), a suspect relation to exclude
-    # (TTWO->NVDA), a known mean-reversion pair (ESS/AVB), and a plain
-    # lag!=0 same-market row that should just get the general p-value
-    # caution note (AMD/INTC).
+    # Covers the review outcomes from the 2026-07-29 manual pass over the 17
+    # same-market lag!=0 correlations in one page render: a KG mirror
+    # duplicate (DOW/LYB, both directions), a known mean-reversion pair
+    # (ESS/AVB), and plain lag!=0 same-market rows that should just get the
+    # general p-value caution note (AMD/INTC, TTWO/NVDA). TTWO->NVDA was
+    # briefly excluded as a "suspect" relation in an earlier pass, then
+    # confirmed legitimate on closer inspection (relation_type='fournisseur'
+    # means "target supplies source" in this codebase's own convention --
+    # verified against AAPL's real suppliers TSM/Foxconn and NVDA's real
+    # clients AMZN/GOOGL/META/MSFT -- so "NVIDIA supplies Take-Two" is
+    # exactly what the KG edge says, not backwards) -- it must display
+    # normally like any other same-market lag!=0 row now.
     import dashboard.app as app
 
     def _stub():
@@ -488,7 +482,7 @@ def _run_page_correlations_with_badges():
     app.page_correlations()
 
 
-def test_page_correlations_applies_dedup_exclusion_and_badges():
+def test_page_correlations_applies_dedup_and_badges():
     at = AppTest.from_function(_run_page_correlations_with_badges, default_timeout=60).run()
     assert not at.exception, f"page_correlations raised: {list(at.exception)}"
 
@@ -498,8 +492,9 @@ def test_page_correlations_applies_dedup_exclusion_and_badges():
         "DOW/LYB mirror pair must be collapsed to a single displayed row, "
         f"got headers: {headers}"
     )
-    assert "TTWO" not in joined_headers and "NVDA" not in joined_headers, (
-        f"Suspect relation TTWO->NVDA must be excluded from display, got: {headers}"
+    assert "TTWO" in joined_headers and "NVDA" in joined_headers, (
+        "TTWO/NVDA was confirmed legitimate (not backwards) and must display "
+        f"normally, got headers: {headers}"
     )
 
     warnings = [w.value for w in at.warning]
@@ -509,8 +504,5 @@ def test_page_correlations_applies_dedup_exclusion_and_badges():
 
     captions = [c.value for c in at.caption]
     assert any("prudence supplementaire" in c for c in captions), (
-        f"Expected the general lag!=0 caution note for AMD/INTC, got: {captions}"
-    )
-    assert any("exclue(s)" in c and "TTWO" in c for c in captions), (
-        f"Expected the top summary caption to mention the excluded relation, got: {captions}"
+        f"Expected the general lag!=0 caution note for AMD/INTC and TTWO/NVDA, got: {captions}"
     )
