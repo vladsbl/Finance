@@ -339,6 +339,246 @@ def test_page_graph_loads_without_error():
     assert not at.exception, f"page_graph raised: {list(at.exception)}"
 
 
+# --- Knowledge Graph: manual relation add/delete form -------------------------
+
+def _manual_rel_memory_conn():
+    import sqlite3
+    import dashboard.app as app
+    conn = sqlite3.connect(":memory:")
+    conn.execute(app.CREATE_RELATIONS_TABLE_SQL)
+    app._ensure_relations_origine_column(conn)
+    conn.commit()
+    return conn
+
+
+def test_relation_duplicate_matches_on_ticker_not_name_text():
+    import dashboard.app as app
+    conn = _manual_rel_memory_conn()
+    conn.execute(
+        "INSERT INTO relations (source_ticker, relation_type, target_name, "
+        "target_ticker, origine) VALUES ('AAPL', 'fournisseur', 'TSMC', 'TSM', 'auto')"
+    )
+    conn.commit()
+    # Same real company, different wording -- must still be caught as a dup.
+    assert app._relation_duplicate(
+        conn, "AAPL", "fournisseur", "TSM",
+        "Taiwan Semiconductor Manufacturing Company") is True
+    assert app._relation_duplicate(conn, "AAPL", "fournisseur", "TSM", "TSMC") is True
+    assert app._relation_duplicate(conn, "AAPL", "concurrent", "TSM", "TSMC") is False
+
+
+def test_relation_duplicate_matches_external_target_on_exact_name():
+    import dashboard.app as app
+    conn = _manual_rel_memory_conn()
+    conn.execute(
+        "INSERT INTO relations (source_ticker, relation_type, target_name, "
+        "target_ticker, origine) VALUES ('AAPL', 'dependance', 'Rare earth metals', "
+        "NULL, 'auto')"
+    )
+    conn.commit()
+    assert app._relation_duplicate(conn, "AAPL", "dependance", None, "Rare earth metals") is True
+    assert app._relation_duplicate(conn, "AAPL", "dependance", None, "Lithium") is False
+
+
+def test_add_manual_relation_inserts_and_tags_origine_manuel():
+    import dashboard.app as app
+    conn = _manual_rel_memory_conn()
+    ok, error = app.add_manual_relation(
+        conn, "AAPL", "concurrent", "Samsung Electronics", "005930.KS", "Test")
+    assert ok and error is None
+    row = conn.execute(
+        "SELECT source_ticker, relation_type, target_name, target_ticker, "
+        "notes, origine FROM relations"
+    ).fetchone()
+    assert row == ("AAPL", "concurrent", "Samsung Electronics", "005930.KS", "Test", "manuel")
+
+
+def test_add_manual_relation_rejects_duplicate():
+    import dashboard.app as app
+    conn = _manual_rel_memory_conn()
+    ok1, _ = app.add_manual_relation(conn, "AAPL", "concurrent", "Samsung", "005930.KS", None)
+    assert ok1
+    ok2, error2 = app.add_manual_relation(
+        conn, "AAPL", "concurrent", "Samsung Electronics Co.", "005930.KS", None)
+    assert ok2 is False
+    assert "existe deja" in error2
+    assert conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 1
+
+
+def test_load_and_delete_manual_relation_scoped_to_origine_manuel():
+    import dashboard.app as app
+    conn = _manual_rel_memory_conn()
+    conn.execute(
+        "INSERT INTO relations (source_ticker, relation_type, target_name, "
+        "target_ticker, origine) VALUES ('NVDA', 'concurrent', 'AMD', 'AMD', 'auto')"
+    )
+    ok, _ = app.add_manual_relation(conn, "AAPL", "partenaire", "Acme Corp", None, None)
+    assert ok
+    manual = app.load_manual_relations(conn)
+    assert len(manual) == 1 and manual[0]["source_ticker"] == "AAPL"
+
+    # An auto relation's id must never be deletable through this admin path.
+    auto_id = conn.execute(
+        "SELECT id FROM relations WHERE source_ticker='NVDA'").fetchone()[0]
+    assert app.delete_manual_relation(conn, auto_id) is False
+    assert conn.execute("SELECT COUNT(*) FROM relations WHERE source_ticker='NVDA'").fetchone()[0] == 1
+
+    assert app.delete_manual_relation(conn, manual[0]["id"]) is True
+    assert app.load_manual_relations(conn) == []
+
+
+def _run_page_graph_manual_form_submit():
+    # Isolates the write path: add_manual_relation is replaced with a spy so
+    # no real network/DB write happens, and we can assert it was called with
+    # the exact arguments the form should have resolved.
+    import dashboard.app as app
+
+    calls = []
+
+    def _spy(conn, source_ticker, relation_type, target_name, target_ticker, notes):
+        calls.append((source_ticker, relation_type, target_name, target_ticker, notes))
+        return True, None
+
+    app.add_manual_relation = _spy
+    app.load_manual_relations = lambda conn: []
+    app._test_spy_calls = calls
+    app.page_graph()
+
+
+def test_manual_relation_form_submits_with_resolved_target():
+    at = AppTest.from_function(_run_page_graph_manual_form_submit, default_timeout=60).run()
+    assert not at.exception, f"page_graph raised: {list(at.exception)}"
+
+    at.selectbox(key="manual_rel_source").set_value("AAPL").run()
+    at.selectbox(key="manual_rel_type").set_value("concurrent").run()
+    at.selectbox(key="manual_rel_target_ticker").set_value("MSFT").run()
+    at.button(key="FormSubmitter:add_manual_relation_form-Ajouter").click().run()
+
+    import dashboard.app as app
+    assert app._test_spy_calls, "add_manual_relation was never called"
+    src, rtype, tname, tticker, notes = app._test_spy_calls[-1]
+    assert src == "AAPL" and rtype == "concurrent" and tticker == "MSFT"
+
+    successes = [s.value for s in at.success]
+    assert any("Relation ajoutee" in s for s in successes), (
+        f"Expected a success message, got: {successes}"
+    )
+
+
+def _run_page_graph_manual_form_self_loop():
+    import dashboard.app as app
+
+    calls = []
+
+    def _spy(conn, *a, **kw):
+        calls.append(a)
+        return True, None
+
+    app.add_manual_relation = _spy
+    app.load_manual_relations = lambda conn: []
+    app._test_spy_calls = calls
+    app.page_graph()
+
+
+def test_manual_relation_form_rejects_source_equals_target():
+    at = AppTest.from_function(_run_page_graph_manual_form_self_loop, default_timeout=60).run()
+    assert not at.exception, f"page_graph raised: {list(at.exception)}"
+
+    source_ticker = at.selectbox(key="manual_rel_source").value
+    at.selectbox(key="manual_rel_target_ticker").set_value(source_ticker).run()
+    at.button(key="FormSubmitter:add_manual_relation_form-Ajouter").click().run()
+
+    import dashboard.app as app
+    assert app._test_spy_calls == [], (
+        "add_manual_relation must not be called when source == target"
+    )
+    errors = [e.value for e in at.error]
+    assert any("different" in e for e in errors), f"Expected a self-loop error, got: {errors}"
+
+
+def _run_page_graph_manual_form_external_target():
+    # Regression test for a real bug found during live-browser testing
+    # (2026-07-30): target_mode used to be an st.radio INSIDE the st.form,
+    # so switching to "Externe (saisie manuelle)" never actually revealed
+    # the text_input fields before submit (widgets inside a form don't
+    # rerun the script on change, only the submit button does) -- the
+    # browser kept showing the universe selectbox from the previous render.
+    # Fixed by moving the radio outside the form.
+    import dashboard.app as app
+
+    calls = []
+
+    def _spy(conn, source_ticker, relation_type, target_name, target_ticker, notes):
+        calls.append((source_ticker, relation_type, target_name, target_ticker, notes))
+        return True, None
+
+    app.add_manual_relation = _spy
+    app.load_manual_relations = lambda conn: []
+    app._test_spy_calls = calls
+    app.page_graph()
+
+
+def test_manual_relation_form_external_target_fields_appear_and_submit():
+    at = AppTest.from_function(
+        _run_page_graph_manual_form_external_target, default_timeout=60).run()
+    assert not at.exception, f"page_graph raised: {list(at.exception)}"
+
+    at.radio(key="manual_rel_target_mode").set_value("Externe (saisie manuelle)").run()
+    assert not at.exception, f"page_graph raised after switching target mode: {list(at.exception)}"
+
+    text_inputs = {t.label: t for t in at.text_input}
+    assert "Nom de l'entreprise cible" in text_inputs, (
+        "Switching to 'Externe' must reveal the manual target-name field "
+        f"before submit, got text_input labels: {list(text_inputs)}"
+    )
+
+    text_inputs["Nom de l'entreprise cible"].set_value("Acme External Corp").run()
+    at.button(key="FormSubmitter:add_manual_relation_form-Ajouter").click().run()
+
+    import dashboard.app as app
+    assert app._test_spy_calls, "add_manual_relation was never called"
+    src, rtype, tname, tticker, notes = app._test_spy_calls[-1]
+    assert tname == "Acme External Corp" and tticker is None
+
+    successes = [s.value for s in at.success]
+    assert any("Acme External Corp" in s for s in successes), (
+        f"Expected a success message naming the external target, got: {successes}"
+    )
+
+
+def _run_page_graph_manual_relations_list_and_delete():
+    import dashboard.app as app
+
+    deleted_ids = []
+
+    app.load_manual_relations = lambda conn: [
+        {"id": 42, "source_ticker": "AAPL", "relation_type": "partenaire",
+         "target_name": "Acme Corp", "target_ticker": None, "notes": "Note test"},
+    ]
+    app.delete_manual_relation = lambda conn, rel_id: (deleted_ids.append(rel_id) or True)
+    app._test_deleted_ids = deleted_ids
+    app.page_graph()
+
+
+def test_manual_relations_list_shows_entry_and_delete_removes_it():
+    at = AppTest.from_function(
+        _run_page_graph_manual_relations_list_and_delete, default_timeout=60).run()
+    assert not at.exception, f"page_graph raised: {list(at.exception)}"
+
+    markdown_text = " ".join(m.value for m in at.markdown)
+    assert "Acme Corp" in markdown_text
+
+    at.button(key="del_manual_rel_42").click().run()
+    assert not at.exception, f"page_graph raised after delete: {list(at.exception)}"
+
+    import dashboard.app as app
+    assert app._test_deleted_ids == [42]
+    successes = [s.value for s in at.success]
+    assert any("supprimee" in s for s in successes), (
+        f"Expected a deletion success message, got: {successes}"
+    )
+
+
 def test_glossaire_loads_with_expected_terms():
     """The glossary dict backing the dashboard's tooltips must load and
     cover the key terms named when it was introduced (RSI, momentum,

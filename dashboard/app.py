@@ -796,6 +796,243 @@ def render_news_page():
 
 from graph.build_graph import build_graph, direct_relations  # noqa: E402
 from graph.build_graph import load_relations as _load_relation_rows  # noqa: E402
+from graph.import_relations import CREATE_TABLE_SQL as CREATE_RELATIONS_TABLE_SQL  # noqa: E402
+
+RELATION_TYPES = ["concurrent", "fournisseur", "client", "partenaire", "dependance"]
+
+RELATION_TYPE_HELP = (
+    "Sens de la relation, du point de vue du ticker SOURCE (convention deja "
+    "en usage dans tout le Knowledge Graph -- verifiee sur AAPL/TSMC et "
+    "NVDA/clients) :\n"
+    "- concurrent : concurrence directe (relation symetrique)\n"
+    "- fournisseur : la CIBLE fournit la SOURCE (ex: source=AAPL, "
+    "fournisseur, cible=TSM -- TSMC fournit Apple)\n"
+    "- client : la CIBLE est cliente de la SOURCE (la source fournit la cible)\n"
+    "- partenaire : partenariat (relation symetrique)\n"
+    "- dependance : la source depend d'une matiere premiere/d'un facteur "
+    "externe (la cible peut ne pas avoir de ticker reel)"
+)
+
+
+def _ensure_relations_origine_column(conn):
+    """Backfills `origine` onto a `relations` table created before this
+    column existed -- import_relations.py's own CREATE_TABLE_SQL doesn't
+    include it. Every pre-existing row (hand-curated pilot seed CSV +
+    Groq-generated batches activated after human review) is tagged 'auto',
+    so only relations added through this dashboard form are ever 'manuel'
+    -- the distinction future audits need to tell the two apart."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(relations)")}
+    if "origine" in cols:
+        return
+    conn.execute("ALTER TABLE relations ADD COLUMN origine TEXT NOT NULL DEFAULT 'auto'")
+    conn.commit()
+
+
+def _relation_duplicate(conn, source_ticker, relation_type, target_ticker, target_name):
+    """Same empirical dedup rule already used when activating a reviewed
+    Groq batch into `relations`: a target with a real ticker is matched on
+    (source, type, ticker) -- never on the raw name text, which can vary in
+    wording for the same real company (e.g. "TSMC" vs "Taiwan Semiconductor
+    Manufacturing Company") -- an unresolved/external target (no ticker) is
+    matched on the exact (source, type, name) tuple instead."""
+    if target_ticker:
+        row = conn.execute(
+            "SELECT id FROM relations WHERE source_ticker=? AND relation_type=? "
+            "AND target_ticker=?",
+            (source_ticker, relation_type, target_ticker),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id FROM relations WHERE source_ticker=? AND relation_type=? "
+            "AND target_name=? AND (target_ticker IS NULL OR target_ticker = '')",
+            (source_ticker, relation_type, target_name),
+        ).fetchone()
+    return row is not None
+
+
+def add_manual_relation(conn, source_ticker, relation_type, target_name, target_ticker, notes):
+    """Insert one manually-curated relation directly into the active
+    Knowledge Graph (`relations`) -- no relations_generated/statut detour,
+    since the human adding it here through this form already IS the
+    validation step. Returns (ok, error_message_or_None). Never raises."""
+    conn.execute(CREATE_RELATIONS_TABLE_SQL)
+    _ensure_relations_origine_column(conn)
+    if _relation_duplicate(conn, source_ticker, relation_type, target_ticker, target_name):
+        return False, "Cette relation existe deja dans le Knowledge Graph (meme source/type/cible)."
+    try:
+        conn.execute(
+            "INSERT INTO relations (source_ticker, relation_type, target_name, "
+            "target_ticker, notes, origine) VALUES (?, ?, ?, ?, ?, 'manuel')",
+            (source_ticker, relation_type, target_name, target_ticker or None,
+             notes or None),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False, "Cette relation existe deja (contrainte d'unicite)."
+    return True, None
+
+
+def load_manual_relations(conn):
+    """All relations added via this dashboard form (origine='manuel'),
+    freshest first -- deliberately NOT @st.cache_data: this backs an
+    admin list/delete panel that must reflect an add/delete from earlier
+    in the very same script run."""
+    _ensure_relations_origine_column(conn)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, source_ticker, relation_type, target_name, target_ticker, notes "
+        "FROM relations WHERE origine = 'manuel' ORDER BY id DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_manual_relation(conn, relation_id):
+    """Delete one relation by id -- scoped to origine='manuel' so this
+    admin control can never remove an auto-generated/pilot-seed relation
+    even if called with the wrong id."""
+    cur = conn.execute(
+        "DELETE FROM relations WHERE id = ? AND origine = 'manuel'", (relation_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def _render_add_relation_form():
+    """'Ajouter une relation manuellement' -- lets a human wire a
+    source->target Knowledge Graph edge directly into `relations`, bypassing
+    graph/generate_relations.py's Groq-proposal + relations_generated review
+    queue entirely, because filling in this form already IS the human
+    validation step. Placed at the top of render_graph_page(), before
+    load_relations() is called, so a successful add/delete's
+    load_relations.clear() takes effect on the SAME script run -- the graph
+    below redraws with the change without a manual page reload (same
+    pattern as the causal-reasoning page's "Recalculer maintenant" button)."""
+    if not os.path.exists(DB_PATH):
+        return
+
+    all_tickers = load_universe_ticker_list()
+    names_by_ticker = load_universe_names()
+
+    def _fmt(t):
+        name = names_by_ticker.get(t, t)
+        return f"{t} - {name}" if name != t else t
+
+    with st.expander("Ajouter une relation manuellement", expanded=False):
+        st.caption(
+            "Relation ecrite directement dans le Knowledge Graph actif, sans "
+            "passer par la generation Groq -- vous etes ici la validation "
+            "humaine."
+        )
+        # Deliberately OUTSIDE the form: widgets inside st.form only take
+        # effect on submit (forms batch input, no rerun on internal change),
+        # so if this radio lived inside the form, switching to "Externe"
+        # would never actually reveal the text_input fields below before the
+        # user hits submit -- the browser would still show the universe
+        # selectbox from the PREVIOUS render. Kept reactive out here instead,
+        # so the form's own content already matches the current choice by
+        # the time it renders.
+        target_mode = st.radio(
+            "Cible", ["Dans l'univers (recherche)", "Externe (saisie manuelle)"],
+            key="manual_rel_target_mode", horizontal=True,
+        )
+        with st.form("add_manual_relation_form", clear_on_submit=True):
+            col_src, col_type = st.columns(2)
+            source_ticker = col_src.selectbox(
+                "Ticker source", all_tickers, key="manual_rel_source",
+                format_func=_fmt,
+            )
+            relation_type = col_type.selectbox(
+                "Type de relation", RELATION_TYPES, key="manual_rel_type",
+                help=RELATION_TYPE_HELP,
+            )
+
+            target_ticker_sel = None
+            target_name_manual = ""
+            target_ticker_manual = ""
+            if target_mode == "Dans l'univers (recherche)":
+                target_ticker_sel = st.selectbox(
+                    "Ticker cible", all_tickers, key="manual_rel_target_ticker",
+                    format_func=_fmt,
+                )
+            else:
+                st.warning(
+                    "Cible hors univers : jamais verifiee empiriquement (pas de "
+                    "confirmation qu'elle est reellement cotee), contrairement "
+                    "aux ajouts automatiques qui passent par une verification "
+                    "yfinance avant d'entrer dans `universe`."
+                )
+                target_name_manual = st.text_input(
+                    "Nom de l'entreprise cible", key="manual_rel_target_name")
+                target_ticker_manual = st.text_input(
+                    "Ticker cible (optionnel, laissez vide si inconnu)",
+                    key="manual_rel_target_ticker_manual",
+                )
+
+            notes = st.text_area(
+                "Justification / note (optionnel)", key="manual_rel_notes",
+                height=68)
+
+            submitted = st.form_submit_button("Ajouter")
+
+        if submitted:
+            if target_mode == "Dans l'univers (recherche)":
+                target_ticker_val = target_ticker_sel
+                target_name_val = names_by_ticker.get(target_ticker_sel, target_ticker_sel)
+            else:
+                target_name_val = target_name_manual.strip()
+                target_ticker_val = target_ticker_manual.strip().upper() or None
+
+            if target_mode == "Dans l'univers (recherche)" and target_ticker_val == source_ticker:
+                st.error("Le ticker cible doit etre different du ticker source.")
+            elif not target_name_val:
+                st.error("Le nom de l'entreprise cible est obligatoire.")
+            else:
+                conn = sqlite3.connect(DB_PATH)
+                try:
+                    ok, error = add_manual_relation(
+                        conn, source_ticker, relation_type, target_name_val,
+                        target_ticker_val, notes.strip() if notes else None,
+                    )
+                finally:
+                    conn.close()
+                if ok:
+                    load_relations.clear()
+                    st.success(
+                        f"Relation ajoutee : {source_ticker} --{relation_type}--> "
+                        f"{target_name_val}" +
+                        (f" ({target_ticker_val})" if target_ticker_val else "")
+                    )
+                else:
+                    st.warning(error)
+
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            manual_relations = load_manual_relations(conn)
+        finally:
+            conn.close()
+        if manual_relations:
+            st.markdown("---")
+            st.markdown("**Relations ajoutees manuellement**")
+            for rel in manual_relations:
+                col_desc, col_del = st.columns([5, 1])
+                target_display = rel["target_name"]
+                if rel["target_ticker"]:
+                    target_display += f" ({rel['target_ticker']})"
+                col_desc.write(
+                    f"`{rel['source_ticker']}` -- **{rel['relation_type']}** --> "
+                    f"{target_display}" + (f" -- _{rel['notes']}_" if rel["notes"] else "")
+                )
+                if col_del.button("Supprimer", key=f"del_manual_rel_{rel['id']}"):
+                    conn = sqlite3.connect(DB_PATH)
+                    try:
+                        deleted = delete_manual_relation(conn, rel["id"])
+                    finally:
+                        conn.close()
+                    if deleted:
+                        load_relations.clear()
+                        st.success(f"Relation supprimee : {rel['source_ticker']} -> {target_display}")
+                    else:
+                        st.warning("Relation introuvable (deja supprimee ?).")
 
 
 @st.cache_data(show_spinner=False)
@@ -924,6 +1161,7 @@ function __graphRecenter() {
 
 def render_graph_page():
     st.subheader("Knowledge Graph")
+    _render_add_relation_form()
     relations = load_relations()
     if not relations:
         st.info(
