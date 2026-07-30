@@ -9,7 +9,9 @@ significant" correlations by pure chance a near-certainty, not a discovery
 Instead, every pair tested here already has a real, human-inspectable
 reason to suspect a relationship: an edge in `relations` (the 40
 hand-curated pilot relations) or `relations_generated` (Groq-proposed,
-graph/generate_relations.py, statut='a_valider'). This turns an
+graph/generate_relations.py, restricted to statut='valide' -- explicitly
+passed human review, never 'rejete' or still-pending 'a_valider'). This
+turns an
 astronomically large hypothesis space into a small, justified one -- and
 still applies a multiple-testing correction across whatever IS tested,
 because even a "small" set of pairs x lags adds up fast (see LAGS below).
@@ -155,12 +157,17 @@ def load_pairs_from_relations(conn):
 
 
 def load_pairs_from_relations_generated(conn, only_resolved=True):
-    """Same shape, from the Groq-proposed (still 'a_valider') relations.
-    only_resolved=True restricts to rows whose target already matched an
-    existing universe ticker (resolved=1) -- an unresolved row has no
-    target_ticker to correlate against at all."""
+    """Same shape, from the Groq-proposed relations that have explicitly
+    passed HUMAN review (statut='valide') -- never 'rejete', and never
+    'a_valider' (still pending review): a pair a human hasn't looked at yet
+    is exactly the kind of unvetted hypothesis this module's own docstring
+    says it exists to avoid testing. only_resolved=True additionally
+    restricts to rows whose target already matched an existing universe
+    ticker (resolved=1) -- an unresolved row has no target_ticker to
+    correlate against at all."""
     sql = ("SELECT DISTINCT source_ticker, relation_type, target_ticker "
-           "FROM relations_generated WHERE target_ticker IS NOT NULL")
+           "FROM relations_generated WHERE target_ticker IS NOT NULL "
+           "AND statut = 'valide'")
     if only_resolved:
         sql += " AND resolved = 1"
     rows = conn.execute(sql).fetchall()
