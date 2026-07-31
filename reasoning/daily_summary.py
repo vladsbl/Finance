@@ -89,6 +89,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from analysis.combined_score import compute_rsi, proxy_rsi  # noqa: E402
 from analysis.price_valuation_scores_universe import compute_volatility  # noqa: E402
 from graph.build_graph import build_graph, direct_relations, load_relations  # noqa: E402
 
@@ -423,6 +424,189 @@ def load_display_name(conn, ticker):
         (ticker,),
     ).fetchone()
     return row[0] if row else ticker
+
+
+def load_all_tickers_with_names(conn):
+    """{ticker: display_name} for every tracked ticker at once -- same
+    nom_entreprise -> nom -> ticker fallback as load_display_name, just
+    bulk rather than one ticker at a time (e.g. populating a search/
+    autocomplete list, dashboard/app.py's own load_universe_names())."""
+    rows = conn.execute(
+        "SELECT ticker, COALESCE(NULLIF(nom_entreprise, ticker), NULLIF(nom, ''), ticker) "
+        "FROM universe ORDER BY ticker"
+    ).fetchall()
+    return dict(rows)
+
+
+# --- Per-ticker detail (price/valuation, technical, real-fundamental,
+# legacy volatility/volume/final scores + RSI/moving averages) -----------------
+#
+# Distinct from build_signal()/build_daily_summary() above: those read the
+# `opportunites` table (the newer 4-pillar scoring incl. news), scoped to
+# whatever `opportunity_scoring.py` last computed. This reads `final_scores`
+# + `fundamental_real_scores` + `price_history` directly for ANY ticker on
+# demand -- dashboard/app.py's "Analyse d'une action" page (render_detail/
+# render_chart) and the equivalent API route both need this exact same
+# on-demand detail, independent of whether that ticker made it into a
+# recent opportunites snapshot.
+
+LATEST_TICKER_SCORES_SQL = """
+SELECT price_valuation_score, technical_score, volatility_score, volume_score,
+       final_score, confidence
+FROM final_scores WHERE symbol = ? ORDER BY id DESC LIMIT 1;
+"""
+
+LATEST_TICKER_FUNDAMENTAL_SQL = """
+SELECT score_global FROM fundamental_real_scores
+WHERE symbol = ? ORDER BY id DESC LIMIT 1;
+"""
+
+TICKER_PRICE_HISTORY_SQL = """
+SELECT date, close, volume FROM price_history
+WHERE ticker = ? AND close IS NOT NULL ORDER BY date;
+"""
+
+
+def _trailing_average(values, window):
+    """Same value as pandas' Series(values).rolling(window).mean().iloc[-1]
+    -- None (pandas' NaN) if fewer than `window` points exist yet, else the
+    plain average of the last `window` values."""
+    if len(values) < window:
+        return None
+    return sum(values[-window:]) / window
+
+
+def load_ticker_detail(conn, ticker):
+    """Best-effort detail for ANY universe ticker. Each pillar (price/
+    valuation, technical, fundamental-real, legacy volatility/volume/final
+    scores) is independently None if that pillar hasn't been computed for
+    this ticker -- callers must display "N/A"/null per missing piece, same
+    graceful-degradation convention as the rest of this module, never
+    raise. Returns None only if the ticker isn't in `universe` at all.
+
+    `history` is a list of {"date": ..., "close": ...} dicts (JSON-native)
+    rather than a DataFrame -- callers that want a DataFrame (e.g.
+    dashboard/app.py's render_chart, for its rolling-mean chart) build one
+    from it in one line; callers that want JSON (the API) use it directly."""
+    u = conn.execute(
+        "SELECT nom, devise, priorite, nom_entreprise FROM universe WHERE ticker = ?",
+        (ticker,),
+    ).fetchone()
+    if u is None:
+        return None
+    nom, devise, priorite, nom_entreprise = u
+    nom_affiche = (nom_entreprise if nom_entreprise and nom_entreprise != ticker
+                   else (nom or ticker))
+
+    final_row = conn.execute(LATEST_TICKER_SCORES_SQL, (ticker,)).fetchone()
+    (price_valuation_score, technical_score, volatility_score,
+     volume_score, final_score, confidence) = final_row or (None,) * 6
+
+    fund_row = conn.execute(LATEST_TICKER_FUNDAMENTAL_SQL, (ticker,)).fetchone()
+    score_fondamental_reel = fund_row[0] if fund_row else None
+
+    hist_rows = conn.execute(TICKER_PRICE_HISTORY_SQL, (ticker,)).fetchall()
+
+    closes = [r[1] for r in hist_rows]
+    current_price = ma_50 = ma_200 = volatility = last_volume = rsi = None
+    rsi_is_real = False
+    if closes:
+        current_price = closes[-1]
+        ma_50 = _trailing_average(closes, 50)
+        ma_200 = _trailing_average(closes, 200)
+        volatility = compute_volatility(closes)
+        last_volume = hist_rows[-1][2]
+
+        real_rsi = compute_rsi(closes)
+        if real_rsi is not None:
+            rsi, rsi_is_real = real_rsi, True
+        elif ma_50 is not None and ma_200 is not None:
+            rsi, rsi_is_real = proxy_rsi(current_price, ma_50, ma_200), False
+
+    return {
+        "ticker": ticker, "nom_affiche": nom_affiche, "devise": devise or "USD",
+        "priorite": priorite,
+        "current_price": current_price, "ma_50": ma_50, "ma_200": ma_200,
+        "volume": last_volume, "volatility": volatility,
+        "rsi": rsi, "rsi_is_real": rsi_is_real,
+        "price_valuation_score": price_valuation_score,
+        "technical_score": technical_score,
+        "volatility_score": volatility_score,
+        "volume_score": volume_score,
+        "final_score": final_score,
+        "confidence": confidence,
+        "score_fondamental_reel": score_fondamental_reel,
+        "history": [{"date": r[0], "close": r[1]} for r in hist_rows],
+    }
+
+
+def _rolling_average_series(values, window):
+    """Full pandas Series(values).rolling(window).mean() equivalent as a
+    plain list (None wherever pandas would show NaN): the first window-1
+    entries are always None, then a running-sum average from there on.
+    Distinct from _trailing_average, which only needs the single latest
+    point -- this is for the full MA50/MA200 chart series."""
+    n = len(values)
+    result = [None] * n
+    if n < window:
+        return result
+    running_sum = sum(values[:window])
+    result[window - 1] = running_sum / window
+    for i in range(window, n):
+        running_sum += values[i] - values[i - window]
+        result[i] = running_sum / window
+    return result
+
+
+def load_price_chart_series(conn, ticker):
+    """Full price/MA50/MA200 series for the "Analyse d'une action" chart --
+    same rows and same rolling-window computation as dashboard/app.py's
+    render_chart (pandas .rolling(50/200).mean()), converted to EUR the
+    same way (vectorised multiply by the daily exchange rate) when a rate
+    is available; falls back to the native currency (devise_affichee left
+    as the native code) exactly like render_chart's own CURRENCY_SYMBOLS
+    fallback when no rate can be fetched. Returns None if this ticker isn't
+    in `universe` at all; `points` is an empty list (not None) if the
+    ticker exists but has no price_history rows yet."""
+    u = conn.execute("SELECT devise FROM universe WHERE ticker = ?", (ticker,)).fetchone()
+    if u is None:
+        return None
+    devise = u[0] or "USD"
+
+    hist_rows = conn.execute(TICKER_PRICE_HISTORY_SQL, (ticker,)).fetchall()
+    dates = [r[0] for r in hist_rows]
+    closes = [r[1] for r in hist_rows]
+
+    ma_50_series = _rolling_average_series(closes, 50)
+    ma_200_series = _rolling_average_series(closes, 200)
+
+    # Lazy import: dashboard/currency.py has no Streamlit dependency, but
+    # kept local (same convention as format_price_line above) so reasoning/
+    # doesn't take a permanent hard dependency on dashboard/.
+    from dashboard.currency import get_rate_to_eur
+
+    devise_affichee = devise
+    rate = None
+    if devise != "EUR":
+        rate = get_rate_to_eur(conn, devise)
+        if rate is not None:
+            devise_affichee = "EUR"
+
+    def _conv(v):
+        if v is None:
+            return None
+        return v * rate if rate is not None else v
+
+    points = [
+        {
+            "date": dates[i],
+            "close": _conv(closes[i]),
+            "ma_50": _conv(ma_50_series[i]),
+            "ma_200": _conv(ma_200_series[i]),
+        }
+        for i in range(len(dates))
+    ]
+    return {"ticker": ticker, "devise_affichee": devise_affichee, "points": points}
 
 
 def companies_to_watch(graph, relations, ticker):

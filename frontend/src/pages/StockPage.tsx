@@ -1,0 +1,416 @@
+import { useEffect, useState } from 'react'
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
+import {
+  ApiError,
+  fetchStockArguedText,
+  fetchStockChart,
+  fetchStockDetail,
+  fetchTickers,
+} from '../api'
+import { TickerSearch } from '../components/TickerSearch'
+import type {
+  ArguedTextSource,
+  StockChartResponse,
+  StockDetail,
+  TickerListEntry,
+} from '../types'
+
+type TickersState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; tickers: TickerListEntry[] }
+
+type DetailState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; data: StockDetail }
+
+type ChartState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; data: StockChartResponse }
+
+type ArguedTextState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'done'; texte: string | null; source: ArguedTextSource }
+
+function fmt(value: number | null, decimals = 1): string {
+  return value === null ? 'n/a' : value.toFixed(decimals)
+}
+
+function fmtVariation(pct: number | null): string {
+  if (pct === null) return 'n/a'
+  const sign = pct >= 0 ? '+' : ''
+  return `${sign}${pct.toFixed(1)}%`
+}
+
+function loadTickers(setState: (s: TickersState) => void) {
+  setState({ status: 'loading' })
+  fetchTickers()
+    .then((data) => setState({ status: 'ready', tickers: data.tickers }))
+    .catch((err) => {
+      const message =
+        err instanceof ApiError ? err.message : "Erreur inattendue lors du chargement de l'univers."
+      setState({ status: 'error', message })
+    })
+}
+
+function loadDetail(ticker: string, setState: (s: DetailState) => void) {
+  setState({ status: 'loading' })
+  fetchStockDetail(ticker)
+    .then((data) => setState({ status: 'ready', data }))
+    .catch((err) => {
+      const message =
+        err instanceof ApiError ? err.message : `Erreur inattendue lors du chargement de ${ticker}.`
+      setState({ status: 'error', message })
+    })
+}
+
+function loadChart(ticker: string, setState: (s: ChartState) => void) {
+  setState({ status: 'loading' })
+  fetchStockChart(ticker)
+    .then((data) => setState({ status: 'ready', data }))
+    .catch((err) => {
+      const message =
+        err instanceof ApiError ? err.message : 'Erreur inattendue lors du chargement du graphique.'
+      setState({ status: 'error', message })
+    })
+}
+
+export function StockPage() {
+  const [tickersState, setTickersState] = useState<TickersState>({ status: 'loading' })
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(null)
+  const [detailState, setDetailState] = useState<DetailState | null>(null)
+  const [chartState, setChartState] = useState<ChartState | null>(null)
+  const [arguedText, setArguedText] = useState<ArguedTextState>({ status: 'idle' })
+
+  useEffect(() => {
+    loadTickers(setTickersState)
+  }, [])
+
+  function handleSelectTicker(ticker: string) {
+    setSelectedTicker(ticker)
+    loadDetail(ticker, setDetailState)
+    loadChart(ticker, setChartState)
+    // A new ticker resets any argued text from the previous selection --
+    // never carried over, and never auto-generated for the new ticker
+    // either (still requires its own explicit button click, same Groq-
+    // quota discipline as "Resume du jour"'s SignalCard).
+    setArguedText({ status: 'idle' })
+  }
+
+  async function handleGenerateArguedText() {
+    if (!selectedTicker) return
+    setArguedText({ status: 'loading' })
+    try {
+      const result = await fetchStockArguedText(selectedTicker)
+      setArguedText({ status: 'done', texte: result.texte_argumente, source: result.source })
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Erreur inattendue lors de l'appel API."
+      setArguedText({ status: 'error', message })
+    }
+  }
+
+  return (
+    <div>
+      <h1 className="text-2xl font-bold text-gray-900">Analyse d'une action</h1>
+
+      <div className="mt-4">
+        {tickersState.status === 'loading' && (
+          <p className="text-sm text-gray-500">Chargement de l'univers des tickers...</p>
+        )}
+        {tickersState.status === 'error' && (
+          <div className="rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+            <p className="font-medium">Impossible de charger la liste des tickers.</p>
+            <p className="mt-1 text-sm">{tickersState.message}</p>
+            <button
+              type="button"
+              onClick={() => loadTickers(setTickersState)}
+              className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+            >
+              Reessayer
+            </button>
+          </div>
+        )}
+        {tickersState.status === 'ready' && (
+          <TickerSearch tickers={tickersState.tickers} onSelect={handleSelectTicker} />
+        )}
+      </div>
+
+      {!selectedTicker && (
+        <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+          Recherchez un ticker ou une entreprise ci-dessus pour afficher son analyse.
+        </div>
+      )}
+
+      {selectedTicker && detailState?.status === 'loading' && (
+        <div className="mt-8 flex items-center gap-3 text-gray-600">
+          <span
+            className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
+            aria-hidden="true"
+          />
+          Chargement de {selectedTicker}...
+        </div>
+      )}
+
+      {selectedTicker && detailState?.status === 'error' && (
+        <div className="mt-8 rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+          <p className="font-medium">Impossible de charger {selectedTicker}.</p>
+          <p className="mt-1 text-sm">{detailState.message}</p>
+          <button
+            type="button"
+            onClick={() => loadDetail(selectedTicker, setDetailState)}
+            className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+          >
+            Reessayer
+          </button>
+        </div>
+      )}
+
+      {selectedTicker && detailState?.status === 'ready' && (
+        <StockDetailView
+          detail={detailState.data}
+          chartState={chartState}
+          arguedText={arguedText}
+          onGenerateArguedText={handleGenerateArguedText}
+        />
+      )}
+    </div>
+  )
+}
+
+function StockDetailView({
+  detail,
+  chartState,
+  arguedText,
+  onGenerateArguedText,
+}: {
+  detail: StockDetail
+  chartState: ChartState | null
+  arguedText: ArguedTextState
+  onGenerateArguedText: () => void
+}) {
+  return (
+    <div className="mt-6 flex flex-col gap-6">
+      <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-lg font-semibold text-gray-900">
+            {detail.ticker} <span className="font-normal text-gray-500">-- {detail.nom_affiche}</span>
+          </h2>
+          <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700">
+            Priorite : {detail.priorite}
+          </span>
+        </div>
+
+        {(detail.sector || detail.industry) && (
+          <p className="mt-1 text-sm text-gray-500">
+            {[detail.sector, detail.industry].filter(Boolean).join(' - ')}
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap gap-6 text-sm">
+          <div>
+            <span className="text-gray-500">Prix actuel</span>
+            <p className="text-xl font-semibold text-gray-900">
+              {detail.prix_eur !== null
+                ? `${detail.prix_eur.toFixed(2)} EUR`
+                : `${fmt(detail.current_price, 2)} ${detail.devise}`}
+            </p>
+            {detail.variations && (
+              <p className="text-xs text-gray-500">
+                1j: {fmtVariation(detail.variations['1j'])} - 7j:{' '}
+                {fmtVariation(detail.variations['7j'])} - 30j:{' '}
+                {fmtVariation(detail.variations['30j'])}
+              </p>
+            )}
+          </div>
+          <div>
+            <span className="text-gray-500">Confiance</span>
+            <p className="text-xl font-semibold text-gray-900">
+              {detail.confidence !== null ? `${detail.confidence.toFixed(0)}%` : 'n/a'}
+            </p>
+          </div>
+          <div>
+            <span className="text-gray-500">RSI</span>
+            <p className="text-xl font-semibold text-gray-900">
+              {fmt(detail.rsi)}
+              {detail.rsi !== null && !detail.rsi_is_real && (
+                <span className="ml-1 text-xs font-normal text-gray-400">(estime)</span>
+              )}
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-2 gap-4 border-t border-gray-100 pt-4 text-sm sm:grid-cols-4">
+          <ScoreStat label="Prix / Valorisation" value={detail.price_valuation_score} />
+          <ScoreStat label="Technique" value={detail.technical_score} />
+          <ScoreStat label="Fondamental reel" value={detail.score_fondamental_reel} />
+          <ScoreStat label="Score global (legacy)" value={detail.final_score} />
+          <ScoreStat label="Volatilite" value={detail.volatility_score} />
+          <ScoreStat label="Volume" value={detail.volume_score} />
+          <ScoreStat label="MA 50" value={detail.ma_50} decimals={2} />
+          <ScoreStat label="MA 200" value={detail.ma_200} decimals={2} />
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+        <h3 className="text-base font-semibold text-gray-900">Prix &amp; moyennes mobiles</h3>
+        <StockChartView chartState={chartState} />
+      </div>
+
+      <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+        <h3 className="text-base font-semibold text-gray-900">Analyse argumentee (IA)</h3>
+        <div className="mt-3">
+          {arguedText.status === 'idle' && (
+            <button
+              type="button"
+              onClick={onGenerateArguedText}
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              Generer l'analyse
+            </button>
+          )}
+
+          {arguedText.status === 'loading' && (
+            <div className="flex items-center gap-2 text-sm text-gray-500">
+              <span
+                className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
+                aria-hidden="true"
+              />
+              Generation en cours...
+            </div>
+          )}
+
+          {arguedText.status === 'error' && (
+            <div className="text-sm text-red-600">
+              {arguedText.message}
+              <button
+                type="button"
+                onClick={onGenerateArguedText}
+                className="ml-2 font-medium underline hover:no-underline"
+              >
+                Reessayer
+              </button>
+            </div>
+          )}
+
+          {arguedText.status === 'done' && arguedText.texte && (
+            <div>
+              <p className="whitespace-pre-line text-sm text-gray-800">{arguedText.texte}</p>
+              <p className="mt-2 text-xs text-gray-400">
+                {arguedText.source === 'cache' ? 'Depuis le cache du jour' : "Generee a l'instant"}
+              </p>
+            </div>
+          )}
+
+          {arguedText.status === 'done' && !arguedText.texte && (
+            <p className="text-sm text-gray-500">
+              Analyse indisponible pour l'instant (quota Groq du jour atteint, cle API absente, ou
+              erreur reseau cote serveur, ou {detail.ticker} n'a pas de donnee d'opportunite).
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ScoreStat({
+  label,
+  value,
+  decimals = 1,
+}: {
+  label: string
+  value: number | null
+  decimals?: number
+}) {
+  return (
+    <div>
+      <span className="text-gray-500">{label}</span>
+      <p className="font-semibold text-gray-900">{fmt(value, decimals)}</p>
+    </div>
+  )
+}
+
+function StockChartView({ chartState }: { chartState: ChartState | null }) {
+  if (!chartState || chartState.status === 'loading') {
+    return (
+      <div className="mt-4 flex items-center gap-2 text-sm text-gray-500">
+        <span
+          className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
+          aria-hidden="true"
+        />
+        Chargement du graphique...
+      </div>
+    )
+  }
+
+  if (chartState.status === 'error') {
+    return <p className="mt-4 text-sm text-red-600">{chartState.message}</p>
+  }
+
+  const { points, devise_affichee } = chartState.data
+  if (points.length === 0) {
+    return (
+      <p className="mt-4 text-sm text-gray-500">
+        Aucun historique de prix pour ce ticker pour l'instant.
+      </p>
+    )
+  }
+
+  return (
+    <div className="mt-4 h-80 w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={points} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+          <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={40} />
+          <YAxis
+            tick={{ fontSize: 11 }}
+            width={60}
+            label={{ value: devise_affichee, angle: -90, position: 'insideLeft', fontSize: 11 }}
+          />
+          <Tooltip />
+          <Legend />
+          <Line
+            type="monotone"
+            dataKey="close"
+            name="Prix"
+            stroke="#2b6cb0"
+            dot={false}
+            strokeWidth={1.5}
+            connectNulls
+          />
+          <Line
+            type="monotone"
+            dataKey="ma_50"
+            name="MA 50"
+            stroke="#f59e0b"
+            dot={false}
+            strokeWidth={1.8}
+            connectNulls
+          />
+          <Line
+            type="monotone"
+            dataKey="ma_200"
+            name="MA 200"
+            stroke="#1f4e79"
+            dot={false}
+            strokeWidth={1.8}
+            connectNulls
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}

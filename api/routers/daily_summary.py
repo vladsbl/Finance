@@ -10,22 +10,10 @@ reasoning/daily_summary.py once, for the CLI, the Streamlit dashboard, and
 this API all at once.
 """
 
-from datetime import date
-
 from fastapi import APIRouter, Depends, HTTPException
 
-from api.dependencies import get_db, normalise_ticker
-from graph.build_graph import build_graph, load_relations
-from reasoning.daily_summary import (
-    TICKER_ANALYSIS_DAILY_LIMIT,
-    USAGE_TABLE_TICKER_ANALYSIS,
-    add_argued_texts,
-    build_daily_summary,
-    build_signal,
-    load_cached_argument,
-    load_opportunite_for_ticker,
-    staleness_summary,
-)
+from api.dependencies import get_db, get_or_generate_argued_text, normalise_ticker
+from reasoning.daily_summary import build_daily_summary, staleness_summary
 
 router = APIRouter(prefix="/api/daily-summary", tags=["daily-summary"])
 
@@ -66,8 +54,8 @@ def get_argued_text(ticker: str, conn=Depends(get_db)):
     donnees d'opportunite" message."""
     ticker = normalise_ticker(ticker)
 
-    opp_row = load_opportunite_for_ticker(conn, ticker)
-    if opp_row is None:
+    found, result = get_or_generate_argued_text(conn, ticker)
+    if not found:
         raise HTTPException(
             status_code=404,
             detail=(
@@ -76,24 +64,4 @@ def get_argued_text(ticker: str, conn=Depends(get_db)):
                 "pour l'inclure."
             ),
         )
-
-    relations = load_relations(conn)
-    graph = build_graph(relations)
-    signal = build_signal(conn, opp_row, graph, relations)
-
-    today = date.today().isoformat()
-    cached = load_cached_argument(conn, today, ticker)
-    if cached:
-        return {"ticker": ticker, "texte_argumente": cached, "source": "cache"}
-
-    add_argued_texts(
-        conn, [signal],
-        usage_table=USAGE_TABLE_TICKER_ANALYSIS,
-        call_limit=TICKER_ANALYSIS_DAILY_LIMIT,
-    )
-    texte = signal.get("texte_argumente")
-    return {
-        "ticker": ticker,
-        "texte_argumente": texte,
-        "source": "generated" if texte else "unavailable",
-    }
+    return result

@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom'
 const LINKS = [
   { to: '/', label: 'Resume du jour' },
   { to: '/opportunities', label: 'Opportunites du jour' },
+  { to: '/stock', label: "Analyse d'une action" },
 ]
 
 export function NavBar() {

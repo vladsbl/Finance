@@ -94,6 +94,7 @@ app.add_middleware(
 app.include_router(daily_summary.router)
 app.include_router(opportunities.router)
 app.include_router(stock.router)
+app.include_router(stock.tickers_router)
 app.include_router(graph.router)
 app.include_router(correlations.router)
 app.include_router(causal_reasoning.router)

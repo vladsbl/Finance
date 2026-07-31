@@ -35,13 +35,13 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from analysis.combined_score import compute_rsi, proxy_rsi  # noqa: E402
-from analysis.price_valuation_scores_universe import compute_volatility  # noqa: E402
 from dashboard.currency import CURRENCY_SYMBOLS, format_amount, get_rate_to_eur  # noqa: E402
 from dashboard.glossaire import GLOSSAIRE, highlight_terms, term_span  # noqa: E402
 from reasoning.daily_summary import (  # noqa: E402
     MIN_CONFIDENCE, TICKER_ANALYSIS_DAILY_LIMIT, USAGE_TABLE_TICKER_ANALYSIS,
     add_argued_texts, build_daily_summary, build_signal, get_usage,
     load_cached_argument, load_display_name, load_opportunite_for_ticker,
+    load_ticker_detail as _load_ticker_detail_row,
     staleness_note, staleness_summary,
 )
 from reasoning.causal_reasoning import (  # noqa: E402
@@ -202,23 +202,11 @@ def load_exchange_rate(currency):
 # back "Vue d'ensemble"'s legacy Top 10 + stats. "Analyse d'une action" reads
 # ANY universe ticker instead, computing everything from price_history +
 # final_scores + fundamental_real_scores directly so it never depends on the
-# pilot-only `stocks` snapshot table.
-
-LATEST_TICKER_SCORES_SQL = """
-SELECT price_valuation_score, technical_score, volatility_score, volume_score,
-       final_score, confidence
-FROM final_scores WHERE symbol = ? ORDER BY id DESC LIMIT 1;
-"""
-
-LATEST_TICKER_FUNDAMENTAL_SQL = """
-SELECT score_global FROM fundamental_real_scores
-WHERE symbol = ? ORDER BY id DESC LIMIT 1;
-"""
-
-TICKER_PRICE_HISTORY_SQL = """
-SELECT date, close, volume FROM price_history
-WHERE ticker = ? AND close IS NOT NULL ORDER BY date;
-"""
+# pilot-only `stocks` snapshot table. The actual computation
+# (reasoning.daily_summary.load_ticker_detail, imported above as
+# _load_ticker_detail_row) is shared verbatim with api/routers/stock.py --
+# this module only adds the DB_PATH-opening + @st.cache_data wrapping every
+# other loader in this file already does.
 
 
 @st.cache_data(show_spinner=False)
@@ -239,72 +227,28 @@ def load_universe_ticker_list():
 
 @st.cache_data(show_spinner=False)
 def load_ticker_detail(ticker):
-    """Best-effort detail for ANY universe ticker. Each pillar (price/
-    valuation, technical, fundamental-real, legacy volatility/volume/final
-    scores) is independently None if that pillar hasn't been computed for
-    this ticker -- callers must display "N/A" per missing piece, same
-    graceful-degradation convention as the rest of the app, never raise.
-    Returns None only if the ticker isn't in `universe` at all."""
+    """Best-effort detail for ANY universe ticker -- thin DB_PATH-opening +
+    caching wrapper around reasoning.daily_summary.load_ticker_detail
+    (imported above as _load_ticker_detail_row), shared verbatim with
+    api/routers/stock.py so the two never drift into two slightly
+    different computations. `history` is converted from that function's
+    JSON-native list-of-dicts back into the DataFrame render_chart()
+    expects -- everything else passes through unchanged."""
     if not os.path.exists(DB_PATH):
         return None
     conn = sqlite3.connect(DB_PATH)
     try:
-        u = conn.execute(
-            "SELECT nom, devise, priorite, nom_entreprise FROM universe WHERE ticker = ?",
-            (ticker,),
-        ).fetchone()
-        if u is None:
-            return None
-        nom, devise, priorite, nom_entreprise = u
-        nom_affiche = (nom_entreprise if nom_entreprise and nom_entreprise != ticker
-                       else (nom or ticker))
-
-        final_row = conn.execute(LATEST_TICKER_SCORES_SQL, (ticker,)).fetchone()
-        (price_valuation_score, technical_score, volatility_score,
-         volume_score, final_score, confidence) = final_row or (None,) * 6
-
-        fund_row = conn.execute(LATEST_TICKER_FUNDAMENTAL_SQL, (ticker,)).fetchone()
-        score_fondamental_reel = fund_row[0] if fund_row else None
-
-        hist_rows = conn.execute(TICKER_PRICE_HISTORY_SQL, (ticker,)).fetchall()
+        detail = _load_ticker_detail_row(conn, ticker)
     finally:
         conn.close()
-
-    history_df = pd.DataFrame(hist_rows, columns=["date", "close", "volume"])
-    current_price = ma_50 = ma_200 = volatility = last_volume = rsi = None
-    rsi_is_real = False
-    if not history_df.empty:
-        closes = history_df["close"].tolist()
-        current_price = closes[-1]
-        ma_50_last = pd.Series(closes).rolling(50).mean().iloc[-1]
-        ma_200_last = pd.Series(closes).rolling(200).mean().iloc[-1]
-        ma_50 = float(ma_50_last) if pd.notna(ma_50_last) else None
-        ma_200 = float(ma_200_last) if pd.notna(ma_200_last) else None
-        volatility = compute_volatility(closes)
-        last_volume = history_df["volume"].iloc[-1]
-
-        real_rsi = compute_rsi(closes)
-        if real_rsi is not None:
-            rsi, rsi_is_real = real_rsi, True
-        elif ma_50 is not None and ma_200 is not None:
-            rsi, rsi_is_real = proxy_rsi(current_price, ma_50, ma_200), False
-
-    return {
-        "ticker": ticker, "nom_affiche": nom_affiche, "devise": devise or "USD",
-        "priorite": priorite,
-        "current_price": current_price, "ma_50": ma_50, "ma_200": ma_200,
-        "volume": last_volume, "volatility": volatility,
-        "rsi": rsi, "rsi_is_real": rsi_is_real,
-        "price_valuation_score": price_valuation_score,
-        "technical_score": technical_score,
-        "volatility_score": volatility_score,
-        "volume_score": volume_score,
-        "final_score": final_score,
-        "confidence": confidence,
-        "score_fondamental_reel": score_fondamental_reel,
-        "history": (history_df[["date", "close"]] if not history_df.empty
-                   else pd.DataFrame(columns=["date", "close"])),
-    }
+    if detail is None:
+        return None
+    detail = dict(detail)
+    detail["history"] = (
+        pd.DataFrame(detail["history"], columns=["date", "close"])
+        if detail["history"] else pd.DataFrame(columns=["date", "close"])
+    )
+    return detail
 
 
 # --- UI helpers ------------------------------------------------------------

@@ -3,6 +3,9 @@ import type {
   DailySummaryResponse,
   OpportunitesResponse,
   Priorite,
+  StockChartResponse,
+  StockDetail,
+  TickersResponse,
 } from './types'
 
 // Relative paths on purpose -- Vite's dev proxy (vite.config.ts) forwards
@@ -66,4 +69,22 @@ export function fetchOpportunites(
     offset: String(offset),
   })
   return getJson<OpportunitesResponse>(`/opportunities?${params.toString()}`)
+}
+
+// --- /api/tickers + /api/stock/{ticker}* ----------------------------------------
+
+export function fetchTickers(): Promise<TickersResponse> {
+  return getJson<TickersResponse>('/tickers')
+}
+
+export function fetchStockDetail(ticker: string): Promise<StockDetail> {
+  return getJson<StockDetail>(`/stock/${encodeURIComponent(ticker)}`)
+}
+
+export function fetchStockChart(ticker: string): Promise<StockChartResponse> {
+  return getJson<StockChartResponse>(`/stock/${encodeURIComponent(ticker)}/chart`)
+}
+
+export function fetchStockArguedText(ticker: string): Promise<ArguedTextResponse> {
+  return getJson<ArguedTextResponse>(`/stock/${encodeURIComponent(ticker)}/argued-text`)
 }

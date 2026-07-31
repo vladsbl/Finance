@@ -75,3 +75,52 @@ export interface OpportunitesResponse {
   limit: number
   offset: number
 }
+
+// Mirrors api/routers/stock.py exactly.
+
+export interface TickerListEntry {
+  ticker: string
+  nom_affiche: string
+}
+
+export interface TickersResponse {
+  tickers: TickerListEntry[]
+}
+
+export interface StockDetail {
+  ticker: string
+  nom_affiche: string
+  priorite: string
+  devise: string
+  current_price: number | null
+  prix_eur: number | null
+  variations: PriceVariations | null
+  ma_50: number | null
+  ma_200: number | null
+  volume: number | null
+  volatility: number | null
+  rsi: number | null
+  rsi_is_real: boolean
+  price_valuation_score: number | null
+  technical_score: number | null
+  volatility_score: number | null
+  volume_score: number | null
+  final_score: number | null
+  confidence: number | null
+  score_fondamental_reel: number | null
+  sector: string | null
+  industry: string | null
+}
+
+export interface StockChartPoint {
+  date: string
+  close: number | null
+  ma_50: number | null
+  ma_200: number | null
+}
+
+export interface StockChartResponse {
+  ticker: string
+  devise_affichee: string
+  points: StockChartPoint[]
+}

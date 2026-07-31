@@ -186,3 +186,113 @@ def test_opportunities_invalid_priorite_returns_422():
     resp = client.get("/api/opportunities", params={"priorite": "inexistante"})
     assert resp.status_code == 422
     assert "inexistante" in resp.json()["detail"]
+
+
+# --- /api/tickers + /api/stock/{ticker}* ----------------------------------------
+#
+# AAPL is used as a "full data" ticker (has final_scores, fundamental_real_scores,
+# 200+ days of price_history, and an opportunites row -- confirmed via manual
+# curl testing against the real project DB). 1COV.DE is used as a "partial
+# data" ticker: it's in `universe` but has no final_scores row and under 50
+# days of price_history, so every score/MA/RSI field must degrade to null
+# rather than error.
+
+def test_tickers_returns_full_universe_list():
+    resp = client.get("/api/tickers")
+    assert resp.status_code == 200
+    body = resp.json()
+    tickers = body["tickers"]
+    assert len(tickers) > 1000  # full universe, not a truncated sample
+    assert all({"ticker", "nom_affiche"} == set(t.keys()) for t in tickers[:5])
+    assert "AAPL" in {t["ticker"] for t in tickers}
+
+
+def test_stock_detail_full_data_ticker():
+    resp = client.get("/api/stock/AAPL")
+    assert resp.status_code == 200
+    body = resp.json()
+    expected_keys = {
+        "ticker", "nom_affiche", "priorite", "devise", "current_price",
+        "prix_eur", "variations", "ma_50", "ma_200", "volume", "volatility",
+        "rsi", "rsi_is_real", "price_valuation_score", "technical_score",
+        "volatility_score", "volume_score", "final_score", "confidence",
+        "score_fondamental_reel", "sector", "industry",
+    }
+    assert set(body.keys()) == expected_keys
+    assert body["ticker"] == "AAPL"
+    assert body["current_price"] is not None
+    assert body["ma_50"] is not None and body["ma_200"] is not None
+
+
+def test_stock_detail_partial_data_ticker_degrades_gracefully():
+    resp = client.get("/api/stock/1COV.DE")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ticker"] == "1COV.DE"
+    # Not enough price_history for a 50/200-day rolling average yet.
+    assert body["ma_50"] is None
+    assert body["ma_200"] is None
+    # Never scored by final_scores -- these pillars are null, not a 500.
+    assert body["price_valuation_score"] is None
+    assert body["technical_score"] is None
+    assert body["final_score"] is None
+
+
+def test_stock_detail_unknown_ticker_returns_404():
+    resp = client.get("/api/stock/NOTATICKER123")
+    assert resp.status_code == 404
+    assert "NOTATICKER123" in resp.json()["detail"]
+
+
+def test_stock_detail_lowercase_ticker_is_normalised():
+    resp = client.get("/api/stock/aapl")
+    assert resp.status_code == 200
+    assert resp.json()["ticker"] == "AAPL"
+
+
+def test_stock_chart_full_data_ticker():
+    resp = client.get("/api/stock/AAPL/chart")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ticker"] == "AAPL"
+    assert body["devise_affichee"] == "EUR"
+    assert len(body["points"]) > 200
+    last = body["points"][-1]
+    assert {"date", "close", "ma_50", "ma_200"} == set(last.keys())
+    assert last["ma_50"] is not None and last["ma_200"] is not None
+
+
+def test_stock_chart_partial_data_ticker_has_null_moving_averages():
+    resp = client.get("/api/stock/1COV.DE/chart")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body["points"], list)
+    assert all(p["ma_50"] is None for p in body["points"])
+    assert all(p["ma_200"] is None for p in body["points"])
+
+
+def test_stock_chart_unknown_ticker_returns_404():
+    resp = client.get("/api/stock/NOTATICKER123/chart")
+    assert resp.status_code == 404
+
+
+def test_stock_argued_text_unknown_ticker_returns_404():
+    resp = client.get("/api/stock/NOTATICKER123/argued-text")
+    assert resp.status_code == 404
+    assert "NOTATICKER123" in resp.json()["detail"]
+
+
+def test_stock_argued_text_never_calls_groq_during_tests():
+    """Same PYTEST_CURRENT_TEST guard as the daily-summary equivalent
+    (test_argued_text_known_ticker_never_calls_groq_during_tests) -- shared
+    via api/dependencies.py's get_or_generate_argued_text, so this must
+    behave identically here."""
+    resp = client.get("/api/stock/KEY/argued-text")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ticker"] == "KEY"
+    assert body["source"] in {"cache", "unavailable"}
+    if body["source"] == "unavailable":
+        assert body["texte_argumente"] is None
+    else:
+        assert isinstance(body["texte_argumente"], str) and body["texte_argumente"]
