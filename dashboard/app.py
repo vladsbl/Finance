@@ -1536,109 +1536,28 @@ def render_causal_reasoning_page():
 
 # --- Correlations decouvertes (module 8) --------------------------------------
 
-CORRELATIONS_SQL = """
-SELECT ticker_source, ticker_target, relation_type, source_table, lag,
-       lag_direction, coefficient, p_value, p_value_corrigee, n_observations,
-       methode, correction, meme_marche, created_at
-FROM correlations_discovered
-ORDER BY ABS(coefficient) DESC;
-"""
+from reasoning.correlation_discovery import (  # noqa: E402
+    classify_correlation_badge,
+    dedupe_mirror_correlations as _dedupe_mirror_correlations,
+    format_lag_direction as _format_lag_direction,
+)
+from reasoning.correlation_discovery import load_correlations as _load_correlations_rows  # noqa: E402
 
 
 @st.cache_data(show_spinner=False)
 def load_correlations():
-    """Return (correlations, error). Each dict also carries the two
-    tickers' real display names (nom_source/nom_target) so the page never
-    shows a bare, unfamiliar ticker with no context."""
+    """Return (correlations, error) -- thin cached wrapper around
+    reasoning.correlation_discovery.load_correlations, same pattern as
+    load_opportunites_multi/load_ticker_detail's own dashboard wrappers."""
     if not os.path.exists(DB_PATH):
         return [], None
     try:
         conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        rows = [dict(r) for r in conn.execute(CORRELATIONS_SQL).fetchall()]
-        for row in rows:
-            row["nom_source"] = load_display_name(conn, row["ticker_source"])
-            row["nom_target"] = load_display_name(conn, row["ticker_target"])
+        rows = _load_correlations_rows(conn)
         conn.close()
     except sqlite3.Error as exc:
         return [], str(exc)
     return rows, None
-
-
-# Same-market lag!=0 pairs where a MUCH stronger simultaneous (lag=0)
-# correlation for the identical pair is already known (ESS/AVB and ESS/EQR:
-# lag=0 coefficient ~4x the lag!=0 one) -- a classic mean-reversion pattern
-# around an already-strong lag=0 relationship, not an independent lagged
-# signal. Curated manually rather than a generic "ratio > threshold" rule:
-# several OTHER pairs in this same batch (e.g. DOW/LYB) show a similar
-# ratio and have not been reviewed for this specific interpretation yet, so
-# auto-flagging by ratio alone would apply a judgment call no one has
-# actually made for those pairs.
-_MEAN_REVERSION_PAIRS = {
-    frozenset({"ESS", "AVB"}),
-    frozenset({"ESS", "EQR"}),
-}
-
-
-def _dedupe_mirror_correlations(rows):
-    """Collapse KG-symmetric mirror rows into a single displayed row.
-
-    The Knowledge Graph often lists a relationship from both sides (e.g.
-    DOW->LYB AND LYB->DOW, both 'concurrent'), so correlation_discovery.py
-    tests each direction independently and stores two rows for what is
-    statistically the exact same lagged fact: "DOW leads LYB by 10 trading
-    days" is identical whether it was discovered via the DOW->LYB edge
-    (lag=+10, source_precede_target) or the LYB->DOW edge (lag=-10,
-    target_precede_source) -- same coefficient, same p-value, same n. This
-    collapses any such pair down to one row, keyed on the resolved (leading
-    ticker, lagging ticker, |lag|) fact rather than on which KG edge
-    happened to generate it, so it applies to every mirrored pair on the
-    page (56 groups / 57 extra rows found across all 608 stored
-    correlations as of 2026-07-29), not just DOW/LYB. Distinct
-    relation_type labels from merged rows are preserved (joined with " / ")
-    so the reader still sees every KG relation that justified testing the
-    pair."""
-    groups = {}
-    order = []
-    for row in rows:
-        if row["lag_direction"] == "simultane":
-            key = (frozenset({row["ticker_source"], row["ticker_target"]}), 0)
-        elif row["lag_direction"] == "source_precede_target":
-            key = ((row["ticker_source"], row["ticker_target"]), abs(row["lag"]))
-        else:
-            key = ((row["ticker_target"], row["ticker_source"]), abs(row["lag"]))
-
-        if key not in groups:
-            merged = dict(row)
-            merged["_merged_types"] = [row["relation_type"]]
-            groups[key] = merged
-            order.append(key)
-        else:
-            merged = groups[key]
-            if row["relation_type"] not in merged["_merged_types"]:
-                merged["_merged_types"].append(row["relation_type"])
-
-    result = []
-    for key in order:
-        merged = groups[key]
-        merged["relation_type"] = " / ".join(merged.pop("_merged_types"))
-        result.append(merged)
-    return result
-
-
-def _format_lag_direction(row):
-    """Plain-language description of the lag/direction pair -- never uses
-    "predit"/"cause" wording (see render_correlations_page's own caution
-    note): always framed as an observed co-movement pattern, not a forecast."""
-    direction = row["lag_direction"]
-    if direction == "simultane":
-        return "Simultanee (meme jour de bourse)"
-    lag_days = abs(row["lag"])
-    if direction == "source_precede_target":
-        return (f"{row['ticker_source']} en avance sur {row['ticker_target']} "
-                f"de {lag_days} jour(s) de bourse")
-    return (f"{row['ticker_target']} en avance sur {row['ticker_source']} "
-            f"de {lag_days} jour(s) de bourse")
 
 
 def render_correlations_page():
@@ -1688,34 +1607,11 @@ def render_correlations_page():
                 f"(source : {'Knowledge Graph valide' if row['source_table'] == 'relations' else row['source_table']})"
             )
 
-            pair_key = frozenset({row["ticker_source"], row["ticker_target"]})
-            if row["lag"] != 0 and not row["meme_marche"]:
-                st.warning(
-                    "⚠️ Decalage inter-marche (probable artefact d'horaire) -- "
-                    f"{row['ticker_source']} et {row['ticker_target']} cotent sur des "
-                    "places boursieres differentes. Un lag non nul entre deux marches "
-                    "dans des fuseaux horaires distincts reflete le plus souvent "
-                    "l'absorption, par le marche qui ouvre plus tard, des informations "
-                    "de la session precedente -- pas necessairement un lien economique "
-                    "retarde specifique a cette paire.",
-                    icon="⚠️",
-                )
-            elif row["lag"] != 0 and pair_key in _MEAN_REVERSION_PAIRS:
-                st.warning(
-                    "⚠️ Probable artefact de retour a la moyenne -- cette paire a deja "
-                    "une forte correlation simultanee connue (lag=0) ; ce resultat a "
-                    "lag non nul, plus faible, reflete vraisemblablement un rebond "
-                    "autour de cette relation deja identifiee plutot qu'un signal "
-                    "decale independant.",
-                    icon="⚠️",
-                )
-            elif row["lag"] != 0 and row["meme_marche"]:
-                st.caption(
-                    "ℹ️ Correlation a lag non nul : la p-value corrigee de ce type de "
-                    "resultat est en general plus proche du seuil de significativite "
-                    "(0.05) que les correlations simultanees, souvent bien plus fortes "
-                    "statistiquement -- a interpreter avec une prudence supplementaire."
-                )
+            badge = classify_correlation_badge(row)
+            if badge and badge["severity"] == "warning":
+                st.warning(f"⚠️ {badge['message']}", icon="⚠️")
+            elif badge:
+                st.caption(f"ℹ️ {badge['message']}")
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Coefficient (Spearman)", f"{row['coefficient']:+.3f}",

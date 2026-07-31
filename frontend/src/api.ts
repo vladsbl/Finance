@@ -1,6 +1,7 @@
 import type {
   AddRelationPayload,
   ArguedTextResponse,
+  CorrelationsResponse,
   DailySummaryResponse,
   GraphResponse,
   ManualRelation,
@@ -131,4 +132,11 @@ export function addManualRelation(payload: AddRelationPayload): Promise<ManualRe
 
 export function deleteManualRelation(id: number): Promise<{ deleted: boolean; id: number }> {
   return deleteRequest<{ deleted: boolean; id: number }>(`/graph/relations/${id}`)
+}
+
+// --- /api/correlations --------------------------------------------------------
+
+export function fetchCorrelations(limit = 50, offset = 0): Promise<CorrelationsResponse> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  return getJson<CorrelationsResponse>(`/correlations?${params.toString()}`)
 }

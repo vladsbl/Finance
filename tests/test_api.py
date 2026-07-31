@@ -468,3 +468,138 @@ def test_graph_manual_relation_unknown_source_returns_404():
 def test_graph_delete_unknown_relation_returns_404():
     resp = client.delete("/api/graph/relations/99999999")
     assert resp.status_code == 404
+
+
+# --- /api/correlations -------------------------------------------------------
+#
+# Known badge examples confirmed against the real project DB via a direct
+# reasoning.correlation_discovery call (not hardcoded blindly): ESS/AVB and
+# ESS/EQR are the two curated MEAN_REVERSION_PAIRS (mean_reversion badge,
+# lag!=0 row only -- their own lag=0 row has no badge); ALB/QYM.MU is an
+# inter_market_lag example (different exchanges); MDLZ/GIS is a same-market
+# lag!=0 example (lag_caution). Searched by ticker pair rather than by
+# position, since a future correlation_discovery.py run could reorder rows.
+
+def _fetch_all_correlations():
+    """Every correlation across both pages needed to reach the known badge
+    examples above (n_total was 551 at last count, i.e. 2 pages of 500)."""
+    page1 = client.get("/api/correlations", params={"limit": 500, "offset": 0}).json()
+    page2 = client.get("/api/correlations", params={"limit": 500, "offset": 500}).json()
+    return page1["correlations"] + page2["correlations"], page1
+
+
+def _find_pair(rows, ticker_a, ticker_b, lag_nonzero=None):
+    pair = {ticker_a, ticker_b}
+    matches = [
+        r for r in rows
+        if {r["ticker_source"], r["ticker_target"]} == pair
+        and (lag_nonzero is None or (r["lag"] != 0) == lag_nonzero)
+    ]
+    return matches[0] if matches else None
+
+
+def test_correlations_returns_expected_top_level_shape():
+    resp = client.get("/api/correlations")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"correlations", "n_before_dedup", "n_total", "limit", "offset"}
+    assert isinstance(body["correlations"], list)
+    assert body["n_before_dedup"] >= body["n_total"]  # dedup only ever collapses, never adds rows
+
+
+def test_correlations_row_shape():
+    resp = client.get("/api/correlations", params={"limit": 1})
+    body = resp.json()
+    if not body["correlations"]:
+        return  # nothing discovered yet in this environment -- not a failure
+    row = body["correlations"][0]
+    expected_keys = {
+        "id", "ticker_source", "nom_source", "ticker_target", "nom_target",
+        "relation_type", "source_table", "lag", "lag_direction", "lag_label",
+        "coefficient", "p_value", "p_value_corrigee", "n_observations",
+        "methode", "correction", "meme_marche", "badge", "created_at",
+    }
+    assert set(row.keys()) == expected_keys
+    assert isinstance(row["meme_marche"], bool)
+
+
+def test_correlations_sorted_by_abs_coefficient_descending():
+    resp = client.get("/api/correlations", params={"limit": 500})
+    rows = resp.json()["correlations"]
+    coeffs = [abs(r["coefficient"]) for r in rows]
+    assert coeffs == sorted(coeffs, reverse=True)
+
+
+def test_correlations_badge_none_for_strong_simultaneous_row():
+    rows, _ = _fetch_all_correlations()
+    lag_zero_rows = [r for r in rows if r["lag"] == 0]
+    if not lag_zero_rows:
+        return
+    assert lag_zero_rows[0]["badge"] is None
+    assert lag_zero_rows[0]["lag_label"] == "Simultanee (meme jour de bourse)"
+
+
+def test_correlations_badge_mean_reversion_for_known_pair():
+    rows, _ = _fetch_all_correlations()
+    row = _find_pair(rows, "ESS", "AVB", lag_nonzero=True) or _find_pair(rows, "ESS", "EQR", lag_nonzero=True)
+    if row is None:
+        return  # curated pair not present in this environment's data -- not a failure
+    assert row["badge"] is not None
+    assert row["badge"]["type"] == "mean_reversion"
+    assert row["badge"]["severity"] == "warning"
+    assert "retour a la moyenne" in row["badge"]["message"]
+
+
+def test_correlations_badge_inter_market_lag_for_known_pair():
+    rows, _ = _fetch_all_correlations()
+    row = _find_pair(rows, "ALB", "QYM.MU")
+    if row is None:
+        return
+    assert row["meme_marche"] is False
+    assert row["badge"]["type"] == "inter_market_lag"
+    assert row["badge"]["severity"] == "warning"
+
+
+def test_correlations_badge_lag_caution_for_known_pair():
+    rows, _ = _fetch_all_correlations()
+    row = _find_pair(rows, "MDLZ", "GIS", lag_nonzero=True)
+    if row is None:
+        return
+    assert row["meme_marche"] is True
+    assert row["badge"]["type"] == "lag_caution"
+    assert row["badge"]["severity"] == "info"
+
+
+def test_correlations_default_limit_is_50():
+    resp = client.get("/api/correlations")
+    body = resp.json()
+    assert body["limit"] == 50
+    assert body["offset"] == 0
+    assert len(body["correlations"]) <= 50
+
+
+def test_correlations_custom_limit_is_respected():
+    resp = client.get("/api/correlations", params={"limit": 10})
+    body = resp.json()
+    assert body["limit"] == 10
+    assert len(body["correlations"]) <= 10
+
+
+def test_correlations_offset_returns_a_different_page():
+    page1 = client.get("/api/correlations", params={"limit": 20, "offset": 0}).json()
+    page2 = client.get("/api/correlations", params={"limit": 20, "offset": 20}).json()
+    ids1 = [r["id"] for r in page1["correlations"]]
+    ids2 = [r["id"] for r in page2["correlations"]]
+    assert page1["n_total"] == page2["n_total"]
+    if ids1 and ids2:
+        assert set(ids1).isdisjoint(ids2)
+
+
+def test_correlations_limit_beyond_max_returns_422():
+    resp = client.get("/api/correlations", params={"limit": 10000})
+    assert resp.status_code == 422
+
+
+def test_correlations_negative_offset_returns_422():
+    resp = client.get("/api/correlations", params={"offset": -1})
+    assert resp.status_code == 422

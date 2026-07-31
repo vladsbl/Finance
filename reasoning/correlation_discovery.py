@@ -427,6 +427,184 @@ def print_report(results, alpha=ALPHA):
     print("=" * 110 + "\n")
 
 
+# --- Read helpers (dashboard "Correlations decouvertes" page + API) ------------
+#
+# Relocated from dashboard/app.py: these were already conn-first, dict-in/
+# dict-out functions with no Streamlit dependency, so this is a straight
+# move (no rewrite) -- dashboard/app.py now imports them from here instead
+# of defining them locally, so the API (api/routers/correlations.py) and
+# the Streamlit page share the exact same load/dedup/classification logic.
+
+CORRELATIONS_SQL = """
+SELECT id, ticker_source, ticker_target, relation_type, source_table, lag,
+       lag_direction, coefficient, p_value, p_value_corrigee, n_observations,
+       methode, correction, meme_marche, created_at
+FROM correlations_discovered
+ORDER BY ABS(coefficient) DESC;
+"""
+
+
+def load_correlations(conn):
+    """Every stored correlation, strongest first (ORDER BY ABS(coefficient)
+    DESC). Each dict also carries the two tickers' real display names
+    (nom_source/nom_target) so a caller never has to show a bare,
+    unfamiliar ticker with no context -- looked up via
+    reasoning.daily_summary.load_all_tickers_with_names (one bulk query)
+    rather than per-row, since this can return several hundred rows."""
+    from reasoning.daily_summary import load_all_tickers_with_names
+
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute(CORRELATIONS_SQL).fetchall()]
+    names = load_all_tickers_with_names(conn)
+    for row in rows:
+        row["nom_source"] = names.get(row["ticker_source"], row["ticker_source"])
+        row["nom_target"] = names.get(row["ticker_target"], row["ticker_target"])
+    return rows
+
+
+# Same-market lag!=0 pairs where a MUCH stronger simultaneous (lag=0)
+# correlation for the identical pair is already known (ESS/AVB and ESS/EQR:
+# lag=0 coefficient ~4x the lag!=0 one) -- a classic mean-reversion pattern
+# around an already-strong lag=0 relationship, not an independent lagged
+# signal. Curated manually rather than a generic "ratio > threshold" rule:
+# several OTHER pairs in this same batch (e.g. DOW/LYB) show a similar
+# ratio and have not been reviewed for this specific interpretation yet, so
+# auto-flagging by ratio alone would apply a judgment call no one has
+# actually made for those pairs.
+MEAN_REVERSION_PAIRS = {
+    frozenset({"ESS", "AVB"}),
+    frozenset({"ESS", "EQR"}),
+}
+
+
+def dedupe_mirror_correlations(rows):
+    """Collapse KG-symmetric mirror rows into a single displayed row.
+
+    The Knowledge Graph often lists a relationship from both sides (e.g.
+    DOW->LYB AND LYB->DOW, both 'concurrent'), so this module tests each
+    direction independently and stores two rows for what is statistically
+    the exact same lagged fact: "DOW leads LYB by 10 trading days" is
+    identical whether it was discovered via the DOW->LYB edge (lag=+10,
+    source_precede_target) or the LYB->DOW edge (lag=-10,
+    target_precede_source) -- same coefficient, same p-value, same n. This
+    collapses any such pair down to one row, keyed on the resolved (leading
+    ticker, lagging ticker, |lag|) fact rather than on which KG edge
+    happened to generate it, so it applies to every mirrored pair (56
+    groups / 57 extra rows found across all 608 stored correlations as of
+    2026-07-29), not just DOW/LYB. Distinct relation_type labels from
+    merged rows are preserved (joined with " / ") so the reader still sees
+    every KG relation that justified testing the pair."""
+    groups = {}
+    order = []
+    for row in rows:
+        if row["lag_direction"] == "simultane":
+            key = (frozenset({row["ticker_source"], row["ticker_target"]}), 0)
+        elif row["lag_direction"] == "source_precede_target":
+            key = ((row["ticker_source"], row["ticker_target"]), abs(row["lag"]))
+        else:
+            key = ((row["ticker_target"], row["ticker_source"]), abs(row["lag"]))
+
+        if key not in groups:
+            merged = dict(row)
+            merged["_merged_types"] = [row["relation_type"]]
+            groups[key] = merged
+            order.append(key)
+        else:
+            merged = groups[key]
+            if row["relation_type"] not in merged["_merged_types"]:
+                merged["_merged_types"].append(row["relation_type"])
+
+    result = []
+    for key in order:
+        merged = groups[key]
+        merged["relation_type"] = " / ".join(merged.pop("_merged_types"))
+        result.append(merged)
+    return result
+
+
+def format_lag_direction(row):
+    """Plain-language description of the lag/direction pair -- never uses
+    "predit"/"cause" wording (see classify_correlation_badge's own caution
+    note): always framed as an observed co-movement pattern, not a
+    forecast."""
+    direction = row["lag_direction"]
+    if direction == "simultane":
+        return "Simultanee (meme jour de bourse)"
+    lag_days = abs(row["lag"])
+    if direction == "source_precede_target":
+        return (f"{row['ticker_source']} en avance sur {row['ticker_target']} "
+                f"de {lag_days} jour(s) de bourse")
+    return (f"{row['ticker_target']} en avance sur {row['ticker_source']} "
+            f"de {lag_days} jour(s) de bourse")
+
+
+def classify_correlation_badge(row, mean_reversion_pairs=MEAN_REVERSION_PAIRS):
+    """One of three mutually-exclusive caution badges for a lag!=0 row, or
+    None for a simultaneous (lag=0) one -- same three cases and same
+    priority order dashboard/app.py's render_correlations_page used to
+    apply inline, just returned as {"type", "severity", "message"} instead
+    of directly calling st.warning/st.caption, so a caller (this dashboard
+    page or the API) renders its own icon/styling per type/severity rather
+    than receiving a pre-formatted string with an embedded emoji:
+
+    - "inter_market_lag" (warning): the two tickers trade on different
+      exchanges -- a non-zero lag between differently-timezoned markets
+      usually reflects the later-opening market absorbing the previous
+      session's information, not necessarily a delayed economic link
+      specific to this pair.
+    - "mean_reversion" (warning): this exact pair already has a much
+      stronger simultaneous (lag=0) correlation on record (see
+      MEAN_REVERSION_PAIRS) -- this weaker lagged result is more likely a
+      rebound around that already-known relationship than an independent
+      delayed signal.
+    - "lag_caution" (info): a same-market lag!=0 result's corrected
+      p-value is generally closer to the significance threshold (0.05)
+      than simultaneous correlations, which are usually far stronger
+      statistically -- worth an extra note of caution, not a warning."""
+    if row["lag"] == 0:
+        return None
+
+    if not row["meme_marche"]:
+        return {
+            "type": "inter_market_lag",
+            "severity": "warning",
+            "message": (
+                f"Decalage inter-marche (probable artefact d'horaire) -- "
+                f"{row['ticker_source']} et {row['ticker_target']} cotent sur des "
+                "places boursieres differentes. Un lag non nul entre deux marches "
+                "dans des fuseaux horaires distincts reflete le plus souvent "
+                "l'absorption, par le marche qui ouvre plus tard, des informations "
+                "de la session precedente -- pas necessairement un lien economique "
+                "retarde specifique a cette paire."
+            ),
+        }
+
+    pair_key = frozenset({row["ticker_source"], row["ticker_target"]})
+    if pair_key in mean_reversion_pairs:
+        return {
+            "type": "mean_reversion",
+            "severity": "warning",
+            "message": (
+                "Probable artefact de retour a la moyenne -- cette paire a deja "
+                "une forte correlation simultanee connue (lag=0) ; ce resultat a "
+                "lag non nul, plus faible, reflete vraisemblablement un rebond "
+                "autour de cette relation deja identifiee plutot qu'un signal "
+                "decale independant."
+            ),
+        }
+
+    return {
+        "type": "lag_caution",
+        "severity": "info",
+        "message": (
+            "Correlation a lag non nul : la p-value corrigee de ce type de "
+            "resultat est en general plus proche du seuil de significativite "
+            "(0.05) que les correlations simultanees, souvent bien plus fortes "
+            "statistiquement -- a interpreter avec une prudence supplementaire."
+        ),
+    }
+
+
 # --- CLI -----------------------------------------------------------------------
 
 def parse_args(argv):

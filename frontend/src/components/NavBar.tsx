@@ -5,6 +5,7 @@ const LINKS = [
   { to: '/opportunities', label: 'Opportunites du jour' },
   { to: '/stock', label: "Analyse d'une action" },
   { to: '/graph', label: 'Knowledge Graph' },
+  { to: '/correlations', label: 'Correlations decouvertes' },
 ]
 
 export function NavBar() {

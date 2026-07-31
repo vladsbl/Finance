@@ -175,3 +175,44 @@ export interface AddRelationPayload {
   target_ticker?: string | null
   notes?: string | null
 }
+
+// Mirrors api/routers/correlations.py exactly.
+
+export type CorrelationBadgeType = 'inter_market_lag' | 'mean_reversion' | 'lag_caution'
+export type CorrelationBadgeSeverity = 'warning' | 'info'
+
+export interface CorrelationBadge {
+  type: CorrelationBadgeType
+  severity: CorrelationBadgeSeverity
+  message: string
+}
+
+export interface Correlation {
+  id: number
+  ticker_source: string
+  nom_source: string
+  ticker_target: string
+  nom_target: string
+  relation_type: string
+  source_table: string
+  lag: number
+  lag_direction: string
+  lag_label: string
+  coefficient: number
+  p_value: number
+  p_value_corrigee: number
+  n_observations: number
+  methode: string
+  correction: string
+  meme_marche: boolean
+  badge: CorrelationBadge | null
+  created_at: string
+}
+
+export interface CorrelationsResponse {
+  correlations: Correlation[]
+  n_before_dedup: number
+  n_total: number
+  limit: number
+  offset: number
+}
