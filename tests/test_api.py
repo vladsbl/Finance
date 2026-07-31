@@ -94,3 +94,95 @@ def test_cors_headers_present_for_dev_origin():
         headers={"Origin": "http://localhost:5173"},
     )
     assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+# --- /api/opportunities --------------------------------------------------------
+
+def test_opportunities_returns_expected_top_level_shape():
+    resp = client.get("/api/opportunities")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {
+        "opportunites", "dates_by_priority", "staleness", "n_total", "limit", "offset",
+    }
+    assert isinstance(body["opportunites"], list)
+    assert body["n_total"] >= len(body["opportunites"])
+
+
+def test_opportunities_row_shape():
+    resp = client.get("/api/opportunities")
+    assert resp.status_code == 200
+    rows = resp.json()["opportunites"]
+    if not rows:
+        return  # nothing scored in this environment -- not a failure
+    expected_keys = {
+        "ticker", "nom_affiche", "priorite", "score_global",
+        "score_prix_valorisation", "score_technique", "score_news",
+        "score_fondamental_reel", "confiance", "explication", "date_calcul",
+    }
+    assert set(rows[0].keys()) == expected_keys
+
+
+def test_opportunities_sorted_by_score_global_descending():
+    resp = client.get("/api/opportunities", params={"limit": 500})
+    rows = resp.json()["opportunites"]
+    scores = [r["score_global"] for r in rows if r["score_global"] is not None]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_opportunities_priorite_filter_scopes_to_one_tier():
+    resp = client.get("/api/opportunities", params={"priorite": "haute"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body["dates_by_priority"].keys()) <= {"haute"}
+    assert all(r["priorite"] == "haute" for r in body["opportunites"])
+
+
+# --- pagination (limit/offset) --------------------------------------------------
+
+def test_opportunities_default_limit_is_50():
+    resp = client.get("/api/opportunities")
+    body = resp.json()
+    assert body["limit"] == 50
+    assert body["offset"] == 0
+    assert len(body["opportunites"]) <= 50
+
+
+def test_opportunities_custom_limit_is_respected():
+    resp = client.get("/api/opportunities", params={"limit": 10})
+    body = resp.json()
+    assert body["limit"] == 10
+    assert len(body["opportunites"]) <= 10
+
+
+def test_opportunities_offset_returns_a_different_page():
+    page1 = client.get("/api/opportunities", params={"limit": 20, "offset": 0}).json()
+    page2 = client.get("/api/opportunities", params={"limit": 20, "offset": 20}).json()
+    tickers1 = [o["ticker"] for o in page1["opportunites"]]
+    tickers2 = [o["ticker"] for o in page2["opportunites"]]
+    assert page1["n_total"] == page2["n_total"]
+    if tickers1 and tickers2:
+        assert set(tickers1).isdisjoint(tickers2)
+
+
+def test_opportunities_n_total_reflects_full_count_not_just_page():
+    small_page = client.get("/api/opportunities", params={"limit": 1}).json()
+    full = client.get("/api/opportunities", params={"limit": 500}).json()
+    assert small_page["n_total"] == full["n_total"]
+    assert len(small_page["opportunites"]) <= 1
+
+
+def test_opportunities_limit_beyond_max_returns_422():
+    resp = client.get("/api/opportunities", params={"limit": 10000})
+    assert resp.status_code == 422
+
+
+def test_opportunities_negative_offset_returns_422():
+    resp = client.get("/api/opportunities", params={"offset": -1})
+    assert resp.status_code == 422
+
+
+def test_opportunities_invalid_priorite_returns_422():
+    resp = client.get("/api/opportunities", params={"priorite": "inexistante"})
+    assert resp.status_code == 422
+    assert "inexistante" in resp.json()["detail"]

@@ -48,3 +48,30 @@ export interface ArguedTextResponse {
   texte_argumente: string | null
   source: ArguedTextSource
 }
+
+// Mirrors api/routers/opportunities.py exactly.
+
+export type Priorite = 'toutes' | 'haute' | 'moyenne' | 'basse'
+
+export interface Opportunite {
+  ticker: string
+  nom_affiche: string
+  priorite: Exclude<Priorite, 'toutes'>
+  score_global: number | null
+  score_prix_valorisation: number | null
+  score_technique: number | null
+  score_news: number | null
+  score_fondamental_reel: number | null
+  confiance: number | null
+  explication: string | null
+  date_calcul: string
+}
+
+export interface OpportunitesResponse {
+  opportunites: Opportunite[]
+  dates_by_priority: Record<string, string>
+  staleness: string | null
+  n_total: number
+  limit: number
+  offset: number
+}

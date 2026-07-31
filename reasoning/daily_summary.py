@@ -199,12 +199,23 @@ def load_opportunites_multi(conn, dates_by_priority):
     OWN latest date_calcul (see resolve_data_dates_by_priority) -- the
     combined replacement for load_opportunites_for_date's single flat date
     whenever candidates must be drawn from the whole universe, not just
-    whichever tier happens to hold the table's global MAX(date_calcul)."""
+    whichever tier happens to hold the table's global MAX(date_calcul).
+
+    Each row also carries `priorite` (the tier it was drawn from -- already
+    known from `dates_by_priority`'s keys, but callers that flatten rows
+    from every tier into one list, e.g. the "Opportunites du jour" page/
+    route, need it attached per-row) and `nom_affiche` (same
+    nom_entreprise -> nom -> ticker fallback used everywhere else in this
+    project, e.g. dashboard/app.py's OPPORTUNITES_SQL) -- both harmless
+    additions for existing callers (build_daily_summary only ever reads
+    named columns it already knew about)."""
     conn.row_factory = sqlite3.Row
     rows = []
     for priorite, data_date in dates_by_priority.items():
         rows.extend(conn.execute(
-            "SELECT o.* FROM opportunites o JOIN universe u ON u.ticker = o.ticker "
+            "SELECT o.*, u.priorite AS priorite, "
+            "COALESCE(NULLIF(u.nom_entreprise, u.ticker), NULLIF(u.nom, ''), u.ticker) AS nom_affiche "
+            "FROM opportunites o JOIN universe u ON u.ticker = o.ticker "
             "WHERE u.priorite = ? AND o.date_calcul = ? AND o.score_global IS NOT NULL",
             (priorite, data_date),
         ).fetchall())

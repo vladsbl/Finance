@@ -1,4 +1,9 @@
-import type { ArguedTextResponse, DailySummaryResponse } from './types'
+import type {
+  ArguedTextResponse,
+  DailySummaryResponse,
+  OpportunitesResponse,
+  Priorite,
+} from './types'
 
 // Relative paths on purpose -- Vite's dev proxy (vite.config.ts) forwards
 // /api/* to the FastAPI backend (uvicorn on :8000), so this module never
@@ -48,4 +53,17 @@ export function fetchDailySummary(): Promise<DailySummaryResponse> {
 
 export function fetchArguedText(ticker: string): Promise<ArguedTextResponse> {
   return getJson<ArguedTextResponse>(`/daily-summary/${encodeURIComponent(ticker)}/argued-text`)
+}
+
+export function fetchOpportunites(
+  priorite: Priorite = 'toutes',
+  limit = 50,
+  offset = 0,
+): Promise<OpportunitesResponse> {
+  const params = new URLSearchParams({
+    priorite,
+    limit: String(limit),
+    offset: String(offset),
+  })
+  return getJson<OpportunitesResponse>(`/opportunities?${params.toString()}`)
 }
