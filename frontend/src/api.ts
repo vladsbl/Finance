@@ -1,6 +1,10 @@
 import type {
+  AddRelationPayload,
   ArguedTextResponse,
   DailySummaryResponse,
+  GraphResponse,
+  ManualRelation,
+  ManualRelationsResponse,
   OpportunitesResponse,
   Priorite,
   StockChartResponse,
@@ -25,10 +29,10 @@ export class ApiError extends Error {
   }
 }
 
-async function getJson<T>(path: string): Promise<T> {
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`${API_BASE}${path}`)
+    response = await fetch(`${API_BASE}${path}`, init)
   } catch {
     // fetch() only throws on a network-level failure (backend down, CORS
     // blocked, DNS, ...) -- never for a 4xx/5xx HTTP status, which is
@@ -47,7 +51,28 @@ async function getJson<T>(path: string): Promise<T> {
     throw new ApiError(response.status, detail)
   }
 
-  return response.json() as Promise<T>
+  // DELETE routes here always return a small JSON body ({"deleted": ...}),
+  // but a bodyless 204 would otherwise make response.json() throw -- keep
+  // this generic rather than special-casing DELETE, in case a future
+  // route legitimately returns 204.
+  const text = await response.text()
+  return (text ? JSON.parse(text) : undefined) as T
+}
+
+function getJson<T>(path: string): Promise<T> {
+  return request<T>(path)
+}
+
+function postJson<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+function deleteRequest<T>(path: string): Promise<T> {
+  return request<T>(path, { method: 'DELETE' })
 }
 
 export function fetchDailySummary(): Promise<DailySummaryResponse> {
@@ -87,4 +112,23 @@ export function fetchStockChart(ticker: string): Promise<StockChartResponse> {
 
 export function fetchStockArguedText(ticker: string): Promise<ArguedTextResponse> {
   return getJson<ArguedTextResponse>(`/stock/${encodeURIComponent(ticker)}/argued-text`)
+}
+
+// --- /api/graph -------------------------------------------------------------
+
+export function fetchGraph(ticker?: string): Promise<GraphResponse> {
+  const suffix = ticker ? `?${new URLSearchParams({ ticker }).toString()}` : ''
+  return getJson<GraphResponse>(`/graph${suffix}`)
+}
+
+export function fetchManualRelations(): Promise<ManualRelationsResponse> {
+  return getJson<ManualRelationsResponse>('/graph/relations/manual')
+}
+
+export function addManualRelation(payload: AddRelationPayload): Promise<ManualRelation> {
+  return postJson<ManualRelation>('/graph/relations', payload)
+}
+
+export function deleteManualRelation(id: number): Promise<{ deleted: boolean; id: number }> {
+  return deleteRequest<{ deleted: boolean; id: number }>(`/graph/relations/${id}`)
 }

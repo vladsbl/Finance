@@ -340,19 +340,28 @@ def test_page_graph_loads_without_error():
 
 
 # --- Knowledge Graph: manual relation add/delete form -------------------------
+#
+# add_manual_relation/_relation_duplicate/load_manual_relations/
+# delete_manual_relation/CREATE_RELATIONS_TABLE_SQL now live in
+# graph/build_graph.py (relocated for api/routers/graph.py's reuse -- see
+# that module's own docstring), so these unit tests exercise them there
+# directly rather than through dashboard.app's re-export. dashboard/app.py's
+# own behaviour (that _render_add_relation_form calls these same functions)
+# is covered separately below by the tests that monkeypatch dashboard.app's
+# imported names.
 
 def _manual_rel_memory_conn():
     import sqlite3
-    import dashboard.app as app
+    import graph.build_graph as build_graph
     conn = sqlite3.connect(":memory:")
-    conn.execute(app.CREATE_RELATIONS_TABLE_SQL)
-    app._ensure_relations_origine_column(conn)
+    conn.execute(build_graph.CREATE_RELATIONS_TABLE_SQL)
+    build_graph._ensure_relations_origine_column(conn)
     conn.commit()
     return conn
 
 
 def test_relation_duplicate_matches_on_ticker_not_name_text():
-    import dashboard.app as app
+    import graph.build_graph as build_graph
     conn = _manual_rel_memory_conn()
     conn.execute(
         "INSERT INTO relations (source_ticker, relation_type, target_name, "
@@ -360,15 +369,15 @@ def test_relation_duplicate_matches_on_ticker_not_name_text():
     )
     conn.commit()
     # Same real company, different wording -- must still be caught as a dup.
-    assert app._relation_duplicate(
+    assert build_graph._relation_duplicate(
         conn, "AAPL", "fournisseur", "TSM",
         "Taiwan Semiconductor Manufacturing Company") is True
-    assert app._relation_duplicate(conn, "AAPL", "fournisseur", "TSM", "TSMC") is True
-    assert app._relation_duplicate(conn, "AAPL", "concurrent", "TSM", "TSMC") is False
+    assert build_graph._relation_duplicate(conn, "AAPL", "fournisseur", "TSM", "TSMC") is True
+    assert build_graph._relation_duplicate(conn, "AAPL", "concurrent", "TSM", "TSMC") is False
 
 
 def test_relation_duplicate_matches_external_target_on_exact_name():
-    import dashboard.app as app
+    import graph.build_graph as build_graph
     conn = _manual_rel_memory_conn()
     conn.execute(
         "INSERT INTO relations (source_ticker, relation_type, target_name, "
@@ -376,14 +385,14 @@ def test_relation_duplicate_matches_external_target_on_exact_name():
         "NULL, 'auto')"
     )
     conn.commit()
-    assert app._relation_duplicate(conn, "AAPL", "dependance", None, "Rare earth metals") is True
-    assert app._relation_duplicate(conn, "AAPL", "dependance", None, "Lithium") is False
+    assert build_graph._relation_duplicate(conn, "AAPL", "dependance", None, "Rare earth metals") is True
+    assert build_graph._relation_duplicate(conn, "AAPL", "dependance", None, "Lithium") is False
 
 
 def test_add_manual_relation_inserts_and_tags_origine_manuel():
-    import dashboard.app as app
+    import graph.build_graph as build_graph
     conn = _manual_rel_memory_conn()
-    ok, error = app.add_manual_relation(
+    ok, error = build_graph.add_manual_relation(
         conn, "AAPL", "concurrent", "Samsung Electronics", "005930.KS", "Test")
     assert ok and error is None
     row = conn.execute(
@@ -394,11 +403,11 @@ def test_add_manual_relation_inserts_and_tags_origine_manuel():
 
 
 def test_add_manual_relation_rejects_duplicate():
-    import dashboard.app as app
+    import graph.build_graph as build_graph
     conn = _manual_rel_memory_conn()
-    ok1, _ = app.add_manual_relation(conn, "AAPL", "concurrent", "Samsung", "005930.KS", None)
+    ok1, _ = build_graph.add_manual_relation(conn, "AAPL", "concurrent", "Samsung", "005930.KS", None)
     assert ok1
-    ok2, error2 = app.add_manual_relation(
+    ok2, error2 = build_graph.add_manual_relation(
         conn, "AAPL", "concurrent", "Samsung Electronics Co.", "005930.KS", None)
     assert ok2 is False
     assert "existe deja" in error2
@@ -406,25 +415,25 @@ def test_add_manual_relation_rejects_duplicate():
 
 
 def test_load_and_delete_manual_relation_scoped_to_origine_manuel():
-    import dashboard.app as app
+    import graph.build_graph as build_graph
     conn = _manual_rel_memory_conn()
     conn.execute(
         "INSERT INTO relations (source_ticker, relation_type, target_name, "
         "target_ticker, origine) VALUES ('NVDA', 'concurrent', 'AMD', 'AMD', 'auto')"
     )
-    ok, _ = app.add_manual_relation(conn, "AAPL", "partenaire", "Acme Corp", None, None)
+    ok, _ = build_graph.add_manual_relation(conn, "AAPL", "partenaire", "Acme Corp", None, None)
     assert ok
-    manual = app.load_manual_relations(conn)
+    manual = build_graph.load_manual_relations(conn)
     assert len(manual) == 1 and manual[0]["source_ticker"] == "AAPL"
 
     # An auto relation's id must never be deletable through this admin path.
     auto_id = conn.execute(
         "SELECT id FROM relations WHERE source_ticker='NVDA'").fetchone()[0]
-    assert app.delete_manual_relation(conn, auto_id) is False
+    assert build_graph.delete_manual_relation(conn, auto_id) is False
     assert conn.execute("SELECT COUNT(*) FROM relations WHERE source_ticker='NVDA'").fetchone()[0] == 1
 
-    assert app.delete_manual_relation(conn, manual[0]["id"]) is True
-    assert app.load_manual_relations(conn) == []
+    assert build_graph.delete_manual_relation(conn, manual[0]["id"]) is True
+    assert build_graph.load_manual_relations(conn) == []
 
 
 def _run_page_graph_manual_form_submit():

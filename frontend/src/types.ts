@@ -124,3 +124,54 @@ export interface StockChartResponse {
   devise_affichee: string
   points: StockChartPoint[]
 }
+
+// Mirrors api/routers/graph.py exactly.
+
+export type GraphNodeKind = 'primary' | 'external'
+
+export interface GraphNode {
+  id: string
+  kind: GraphNodeKind
+  ticker: string
+  label: string
+  display_name: string
+}
+
+export interface GraphEdge {
+  source: string
+  target: string
+  relation_type: string
+  notes: string
+}
+
+export interface GraphResponse {
+  mode: 'top_opportunities' | 'ticker'
+  top_tickers?: string[]
+  ticker?: string
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  n_primary: number
+  n_external: number
+}
+
+export interface ManualRelation {
+  id: number
+  source_ticker: string
+  relation_type: string
+  target_name: string
+  target_ticker: string | null
+  notes: string | null
+}
+
+export interface ManualRelationsResponse {
+  relations: ManualRelation[]
+  relation_types: string[]
+}
+
+export interface AddRelationPayload {
+  source_ticker: string
+  relation_type: string
+  target_name: string
+  target_ticker?: string | null
+  notes?: string | null
+}

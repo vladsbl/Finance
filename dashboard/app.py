@@ -738,107 +738,16 @@ def render_news_page():
 
 # --- Knowledge graph -------------------------------------------------------
 
-from graph.build_graph import build_graph, direct_relations  # noqa: E402
-from graph.build_graph import load_relations as _load_relation_rows  # noqa: E402
-from graph.import_relations import CREATE_TABLE_SQL as CREATE_RELATIONS_TABLE_SQL  # noqa: E402
-
-RELATION_TYPES = ["concurrent", "fournisseur", "client", "partenaire", "dependance"]
-
-RELATION_TYPE_HELP = (
-    "Sens de la relation, du point de vue du ticker SOURCE (convention deja "
-    "en usage dans tout le Knowledge Graph -- verifiee sur AAPL/TSMC et "
-    "NVDA/clients) :\n"
-    "- concurrent : concurrence directe (relation symetrique)\n"
-    "- fournisseur : la CIBLE fournit la SOURCE (ex: source=AAPL, "
-    "fournisseur, cible=TSM -- TSMC fournit Apple)\n"
-    "- client : la CIBLE est cliente de la SOURCE (la source fournit la cible)\n"
-    "- partenaire : partenariat (relation symetrique)\n"
-    "- dependance : la source depend d'une matiere premiere/d'un facteur "
-    "externe (la cible peut ne pas avoir de ticker reel)"
+from graph.build_graph import (  # noqa: E402
+    RELATION_TYPE_HELP,
+    RELATION_TYPES,
+    add_manual_relation,
+    build_graph,
+    delete_manual_relation,
+    direct_relations,
+    load_manual_relations,
 )
-
-
-def _ensure_relations_origine_column(conn):
-    """Backfills `origine` onto a `relations` table created before this
-    column existed -- import_relations.py's own CREATE_TABLE_SQL doesn't
-    include it. Every pre-existing row (hand-curated pilot seed CSV +
-    Groq-generated batches activated after human review) is tagged 'auto',
-    so only relations added through this dashboard form are ever 'manuel'
-    -- the distinction future audits need to tell the two apart."""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(relations)")}
-    if "origine" in cols:
-        return
-    conn.execute("ALTER TABLE relations ADD COLUMN origine TEXT NOT NULL DEFAULT 'auto'")
-    conn.commit()
-
-
-def _relation_duplicate(conn, source_ticker, relation_type, target_ticker, target_name):
-    """Same empirical dedup rule already used when activating a reviewed
-    Groq batch into `relations`: a target with a real ticker is matched on
-    (source, type, ticker) -- never on the raw name text, which can vary in
-    wording for the same real company (e.g. "TSMC" vs "Taiwan Semiconductor
-    Manufacturing Company") -- an unresolved/external target (no ticker) is
-    matched on the exact (source, type, name) tuple instead."""
-    if target_ticker:
-        row = conn.execute(
-            "SELECT id FROM relations WHERE source_ticker=? AND relation_type=? "
-            "AND target_ticker=?",
-            (source_ticker, relation_type, target_ticker),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "SELECT id FROM relations WHERE source_ticker=? AND relation_type=? "
-            "AND target_name=? AND (target_ticker IS NULL OR target_ticker = '')",
-            (source_ticker, relation_type, target_name),
-        ).fetchone()
-    return row is not None
-
-
-def add_manual_relation(conn, source_ticker, relation_type, target_name, target_ticker, notes):
-    """Insert one manually-curated relation directly into the active
-    Knowledge Graph (`relations`) -- no relations_generated/statut detour,
-    since the human adding it here through this form already IS the
-    validation step. Returns (ok, error_message_or_None). Never raises."""
-    conn.execute(CREATE_RELATIONS_TABLE_SQL)
-    _ensure_relations_origine_column(conn)
-    if _relation_duplicate(conn, source_ticker, relation_type, target_ticker, target_name):
-        return False, "Cette relation existe deja dans le Knowledge Graph (meme source/type/cible)."
-    try:
-        conn.execute(
-            "INSERT INTO relations (source_ticker, relation_type, target_name, "
-            "target_ticker, notes, origine) VALUES (?, ?, ?, ?, ?, 'manuel')",
-            (source_ticker, relation_type, target_name, target_ticker or None,
-             notes or None),
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        return False, "Cette relation existe deja (contrainte d'unicite)."
-    return True, None
-
-
-def load_manual_relations(conn):
-    """All relations added via this dashboard form (origine='manuel'),
-    freshest first -- deliberately NOT @st.cache_data: this backs an
-    admin list/delete panel that must reflect an add/delete from earlier
-    in the very same script run."""
-    _ensure_relations_origine_column(conn)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT id, source_ticker, relation_type, target_name, target_ticker, notes "
-        "FROM relations WHERE origine = 'manuel' ORDER BY id DESC"
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def delete_manual_relation(conn, relation_id):
-    """Delete one relation by id -- scoped to origine='manuel' so this
-    admin control can never remove an auto-generated/pilot-seed relation
-    even if called with the wrong id."""
-    cur = conn.execute(
-        "DELETE FROM relations WHERE id = ? AND origine = 'manuel'", (relation_id,))
-    conn.commit()
-    return cur.rowcount > 0
+from graph.build_graph import load_relations as _load_relation_rows  # noqa: E402
 
 
 def _render_add_relation_form():

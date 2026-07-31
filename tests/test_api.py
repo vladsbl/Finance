@@ -296,3 +296,175 @@ def test_stock_argued_text_never_calls_groq_during_tests():
         assert body["texte_argumente"] is None
     else:
         assert isinstance(body["texte_argumente"], str) and body["texte_argumente"]
+
+
+# --- /api/graph -------------------------------------------------------------
+#
+# AAPL is used as a "has real relations" ticker (part of the original
+# hand-curated pilot seed, confirmed via manual curl testing to have 6
+# direct outbound relations). 1COV.DE is used as a "no relations yet"
+# ticker (confirmed empty via the same manual testing) to check the
+# ticker-centered route degrades to an empty graph rather than erroring.
+#
+# Every test that creates a manual relation deletes it again at the end
+# (real project DB, not an in-memory fixture -- these tests must leave no
+# trace, both so the suite is re-runnable and so it never pollutes the
+# actual Knowledge Graph the dashboard/API serve).
+
+def test_graph_default_returns_expected_shape():
+    resp = client.get("/api/graph")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "top_opportunities"
+    assert isinstance(body["top_tickers"], list)
+    assert len(body["top_tickers"]) <= 10
+    assert isinstance(body["nodes"], list)
+    assert isinstance(body["edges"], list)
+    assert body["n_primary"] + body["n_external"] == len(body["nodes"])
+
+
+def test_graph_node_and_edge_shape():
+    resp = client.get("/api/graph")
+    body = resp.json()
+    if not body["nodes"]:
+        return  # no relations at all in this environment -- not a failure
+    node = body["nodes"][0]
+    assert {"id", "kind", "ticker", "label", "display_name"} == set(node.keys())
+    assert node["kind"] in {"primary", "external"}
+    if body["edges"]:
+        edge = body["edges"][0]
+        assert {"source", "target", "relation_type", "notes"} == set(edge.keys())
+
+
+def test_graph_ticker_centered_known_ticker():
+    resp = client.get("/api/graph", params={"ticker": "AAPL"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "ticker"
+    assert body["ticker"] == "AAPL"
+    assert len(body["nodes"]) > 0
+    assert all(e["source"] == "AAPL" for e in body["edges"])
+
+
+def test_graph_ticker_centered_lowercase_is_normalised():
+    resp = client.get("/api/graph", params={"ticker": "aapl"})
+    assert resp.status_code == 200
+    assert resp.json()["ticker"] == "AAPL"
+
+
+def test_graph_ticker_centered_no_relations_returns_empty():
+    resp = client.get("/api/graph", params={"ticker": "1COV.DE"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["nodes"] == []
+    assert body["edges"] == []
+
+
+def test_graph_ticker_centered_unknown_ticker_returns_404():
+    resp = client.get("/api/graph", params={"ticker": "NOTATICKER123"})
+    assert resp.status_code == 404
+    assert "NOTATICKER123" in resp.json()["detail"]
+
+
+def test_graph_manual_relations_add_list_delete_round_trip():
+    """The full CRUD cycle: add -> appears in the manual list -> delete ->
+    gone from the manual list -> a second delete of the same id 404s."""
+    payload = {
+        "source_ticker": "AAPL",
+        "relation_type": "partenaire",
+        "target_name": "Pytest Test Partner Inc.",
+        "target_ticker": "ZZPYTEST",
+        "notes": "cree par tests/test_api.py, doit etre supprime par le meme test",
+    }
+    created = None
+    try:
+        resp = client.post("/api/graph/relations", json=payload)
+        assert resp.status_code == 201
+        created = resp.json()
+        assert created["source_ticker"] == "AAPL"
+        assert created["target_ticker"] == "ZZPYTEST"
+        relation_id = created["id"]
+
+        list_resp = client.get("/api/graph/relations/manual")
+        assert list_resp.status_code == 200
+        list_body = list_resp.json()
+        assert any(r["id"] == relation_id for r in list_body["relations"])
+        assert set(list_body["relation_types"]) == {
+            "concurrent", "fournisseur", "client", "partenaire", "dependance",
+        }
+
+        del_resp = client.delete(f"/api/graph/relations/{relation_id}")
+        assert del_resp.status_code == 200
+        assert del_resp.json() == {"deleted": True, "id": relation_id}
+        created = None  # already cleaned up
+
+        list_resp2 = client.get("/api/graph/relations/manual")
+        assert not any(r["id"] == relation_id for r in list_resp2.json()["relations"])
+
+        del_again = client.delete(f"/api/graph/relations/{relation_id}")
+        assert del_again.status_code == 404
+    finally:
+        if created is not None:
+            client.delete(f"/api/graph/relations/{created['id']}")
+
+
+def test_graph_manual_relation_duplicate_returns_409():
+    payload = {
+        "source_ticker": "AAPL",
+        "relation_type": "partenaire",
+        "target_name": "Pytest Dup Test Inc.",
+        "target_ticker": "ZZPYDUP",
+    }
+    created = None
+    try:
+        first = client.post("/api/graph/relations", json=payload)
+        assert first.status_code == 201
+        created = first.json()
+
+        second = client.post("/api/graph/relations", json=payload)
+        assert second.status_code == 409
+    finally:
+        if created is not None:
+            client.delete(f"/api/graph/relations/{created['id']}")
+
+
+def test_graph_manual_relation_invalid_type_returns_422():
+    resp = client.post("/api/graph/relations", json={
+        "source_ticker": "AAPL",
+        "relation_type": "invalidtype",
+        "target_name": "X",
+    })
+    assert resp.status_code == 422
+
+
+def test_graph_manual_relation_missing_target_name_returns_422():
+    resp = client.post("/api/graph/relations", json={
+        "source_ticker": "AAPL",
+        "relation_type": "concurrent",
+        "target_name": "",
+    })
+    assert resp.status_code == 422
+
+
+def test_graph_manual_relation_target_equals_source_returns_422():
+    resp = client.post("/api/graph/relations", json={
+        "source_ticker": "AAPL",
+        "relation_type": "concurrent",
+        "target_name": "X",
+        "target_ticker": "AAPL",
+    })
+    assert resp.status_code == 422
+
+
+def test_graph_manual_relation_unknown_source_returns_404():
+    resp = client.post("/api/graph/relations", json={
+        "source_ticker": "NOTATICKER123",
+        "relation_type": "concurrent",
+        "target_name": "X",
+    })
+    assert resp.status_code == 404
+
+
+def test_graph_delete_unknown_relation_returns_404():
+    resp = client.delete("/api/graph/relations/99999999")
+    assert resp.status_code == 404
