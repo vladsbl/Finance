@@ -620,9 +620,16 @@ def companies_to_watch(graph, relations, ticker):
 
 # --- Argued text (Groq LLM) --------------------------------------------------
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
-MAX_RETRIES = 5      # for 429 rate-limit backoff, same as analyze_news.py
-BACKOFF_BASE = 2.0   # seconds: 2, 4, 8, 16, 32
+# GROQ_MODEL/MAX_RETRIES/BACKOFF_BASE/MAX_ATTEMPTS_PER_RUN/
+# MAX_CONSECUTIVE_FAILURES: shared across every Groq-calling module -- see
+# reasoning/groq_config.py's own docstring.
+from reasoning.groq_config import (  # noqa: E402
+    BACKOFF_BASE,
+    GROQ_MODEL,
+    MAX_ATTEMPTS_PER_RUN,
+    MAX_CONSECUTIVE_FAILURES,
+    MAX_RETRIES,
+)
 
 # Two SEPARATE daily quota pools, each its own table, so browsing dozens of
 # tickers/day on "Analyse d'une action" (dashboard/app.py) can never block --
@@ -981,7 +988,21 @@ def add_argued_texts(conn, signals, usage_table=USAGE_TABLE_SUMMARY,
                         "Repli sur presentation structuree.", exc)
         return
 
+    attempts = 0
+    consecutive_failures = 0
     for s in pending[:remaining]:
+        # Same anti-backlog-runaway backstop as analyze_news.py/
+        # causal_reasoning.py (see reasoning/groq_config.py) -- `remaining`
+        # already caps this loop tightly via the daily quota, but a
+        # systemically broken model/API (every call failing) should still
+        # stop fast rather than burn the rest of `pending` one guaranteed
+        # failure at a time.
+        if attempts >= MAX_ATTEMPTS_PER_RUN:
+            logger.warning(
+                "Plafond de %d tentatives atteint pour ce run -- arret.",
+                MAX_ATTEMPTS_PER_RUN)
+            break
+        attempts += 1
         try:
             text = generate_with_retry(client, conn, s)
         except Exception as exc:  # noqa: BLE001
@@ -990,9 +1011,24 @@ def add_argued_texts(conn, signals, usage_table=USAGE_TABLE_SUMMARY,
                 "Repli sur presentation structuree pour ce ticker.",
                 s["ticker"], exc,
             )
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logger.error(
+                    "%d echecs Groq consecutifs -- arret (modele/API "
+                    "probablement indisponible ou modele deprecie, voir "
+                    "reasoning/groq_config.py).", consecutive_failures)
+                break
             continue
         if not text:
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logger.error(
+                    "%d echecs Groq consecutifs -- arret (modele/API "
+                    "probablement indisponible ou modele deprecie, voir "
+                    "reasoning/groq_config.py).", consecutive_failures)
+                break
             continue
+        consecutive_failures = 0
         s["texte_argumente"] = text
         save_argument(conn, today_real, s["ticker"], text)
         bump_usage(conn, usage_table, today_real)

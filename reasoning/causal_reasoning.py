@@ -94,6 +94,16 @@ from reasoning.daily_summary import companies_to_watch  # noqa: E402
 from reasoning.daily_summary import (  # noqa: E402
     _create_usage_table_sql, bump_usage, get_usage,
 )
+# GROQ_MODEL/MAX_RETRIES/BACKOFF_BASE/MAX_ATTEMPTS_PER_RUN/
+# MAX_CONSECUTIVE_FAILURES: shared across every Groq-calling module -- see
+# reasoning/groq_config.py's own docstring.
+from reasoning.groq_config import (  # noqa: E402
+    BACKOFF_BASE,
+    GROQ_MODEL,
+    MAX_ATTEMPTS_PER_RUN,
+    MAX_CONSECUTIVE_FAILURES,
+    MAX_RETRIES,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,10 +113,6 @@ logging.basicConfig(
 logger = logging.getLogger("causal_reasoning")
 
 # --- Configuration -----------------------------------------------------------
-
-GROQ_MODEL = "llama-3.3-70b-versatile"
-MAX_RETRIES = 5      # for 429 rate-limit backoff, same as analyze_news.py
-BACKOFF_BASE = 2.0    # seconds: 2, 4, 8, 16, 32
 
 IMPORTANCE_THRESHOLD = 8   # see module docstring for calibration
 CAUSAL_REASONING_DAILY_LIMIT = 5
@@ -466,6 +472,26 @@ def run_causal_reasoning(conn, limit=None, threshold=IMPORTANCE_THRESHOLD):
         stats["error"] = f"Client Groq indisponible ({exc})."
         return stats
 
+    attempts = 0
+    consecutive_failures = 0
+
+    def _note_failure():
+        """Record one failed attempt; True once MAX_CONSECUTIVE_FAILURES
+        have happened in a row -- the backstop bump_usage()'s success-only
+        counter can never provide on its own (see
+        reasoning/groq_config.py -- a deprecated/renamed model returning an
+        error on every call would otherwise never trip the quota check)."""
+        nonlocal consecutive_failures
+        stats["failed"] += 1
+        consecutive_failures += 1
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            logger.error(
+                "%d echecs Groq consecutifs -- arret (modele/API probablement "
+                "indisponible ou modele deprecie, voir reasoning/groq_config.py).",
+                consecutive_failures)
+            return True
+        return False
+
     for news in candidates:
         if get_usage(conn, USAGE_TABLE_CAUSAL, today) >= CAUSAL_REASONING_DAILY_LIMIT:
             stats["quota_exhausted"] = True
@@ -480,6 +506,14 @@ def run_causal_reasoning(conn, limit=None, threshold=IMPORTANCE_THRESHOLD):
             stats["skipped_no_relations"] += 1
             continue
 
+        if attempts >= MAX_ATTEMPTS_PER_RUN:
+            logger.warning(
+                "Plafond de %d tentatives atteint pour ce run -- arret, "
+                "meme si le quota quotidien (%d/%d) n'est pas atteint.",
+                MAX_ATTEMPTS_PER_RUN, stats["processed"], CAUSAL_REASONING_DAILY_LIMIT)
+            break
+        attempts += 1
+
         try:
             raw = generate_with_retry(client, news, direct_rels)
         except Exception as exc:  # noqa: BLE001
@@ -491,11 +525,13 @@ def run_causal_reasoning(conn, limit=None, threshold=IMPORTANCE_THRESHOLD):
                     stats["processed"], exc)
                 break
             logger.error("news_id=%s: appel LLM echoue (%s)", news["news_id"], exc)
-            stats["failed"] += 1
+            if _note_failure():
+                break
             continue
 
         if not raw:
-            stats["failed"] += 1
+            if _note_failure():
+                break
             continue
 
         chaine_texte, impactees, confiance = process_response(news, direct_rels, raw)
@@ -505,10 +541,12 @@ def run_causal_reasoning(conn, limit=None, threshold=IMPORTANCE_THRESHOLD):
         except sqlite3.Error as exc:
             conn.rollback()
             logger.error("news_id=%s: insertion echouee (%s)", news["news_id"], exc)
-            stats["failed"] += 1
+            if _note_failure():
+                break
             continue
 
         bump_usage(conn, USAGE_TABLE_CAUSAL, today)
+        consecutive_failures = 0
         stats["processed"] += 1
         logger.info("news_id=%s (%s) : chaine generee, confiance=%.0f%%, "
                     "%d entreprise(s) impactee(s).",

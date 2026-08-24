@@ -50,10 +50,20 @@ CA_BUNDLE = configure_ca_bundle(DATA_DIR)
 # quota cap so the Groq budget goes to the news that matter most.
 from reasoning.prioritize_news import compute_scores as compute_priority_scores  # noqa: E402
 
-# --- Configuration ---------------------------------------------------------
+# GROQ_MODEL/MAX_RETRIES/BACKOFF_BASE/MAX_ATTEMPTS_PER_RUN/
+# MAX_CONSECUTIVE_FAILURES: shared across every Groq-calling module -- see
+# reasoning/groq_config.py's own docstring for why (a single place to fix a
+# model deprecation, and the anti-backlog-runaway guard this script's own
+# incident motivated).
+from reasoning.groq_config import (  # noqa: E402
+    BACKOFF_BASE,
+    GROQ_MODEL,
+    MAX_ATTEMPTS_PER_RUN,
+    MAX_CONSECUTIVE_FAILURES,
+    MAX_RETRIES,
+)
 
-# Most recent capable model on the Groq free tier at time of writing.
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# --- Configuration ---------------------------------------------------------
 
 # Groq's free tier is limited (~1000 requests/day). Stay under it.
 DAILY_CALL_LIMIT = 1000
@@ -68,8 +78,6 @@ DAILY_CALL_LIMIT = 1000
 MAX_NEWS_PER_TICKER_PER_DAY = 5
 
 MIN_TITLE_LEN = 20
-MAX_RETRIES = 5          # for 429 rate-limit backoff
-BACKOFF_BASE = 2.0       # seconds: 2, 4, 8, 16, 32
 
 # Titles that look like ads / sponsored content are dropped before the LLM.
 SPONSORED_PATTERNS = re.compile(
@@ -402,6 +410,30 @@ def main(argv=None):
     analysed = 0
     failed = 0
     skipped_ticker_cap = 0
+    attempts = 0
+    consecutive_failures = 0
+
+    def _note_failure():
+        """Record one failed attempt; True once MAX_CONSECUTIVE_FAILURES
+        have happened in a row -- the backstop bump_usage()'s success-only
+        counter can never provide on its own, since it never increments
+        when EVERY call fails for a reason unrelated to quota (a
+        deprecated/renamed model returning 404 on every request, e.g., is
+        exactly how this run once burned through a 51,443-item backlog
+        without ever tripping the quota check -- see
+        reasoning/groq_config.py)."""
+        nonlocal failed, consecutive_failures
+        failed += 1
+        consecutive_failures += 1
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            logger.error(
+                "%d echecs Groq consecutifs -- arret (modele/API probablement "
+                "indisponible ou modele deprecie, voir reasoning/groq_config.py). "
+                "%d news restantes pour un prochain run.",
+                consecutive_failures, len(to_analyse) - attempts)
+            return True
+        return False
+
     for news_id, ticker, title, summary in to_analyse:
         if get_usage(conn, today) >= DAILY_CALL_LIMIT:
             logger.warning("Daily quota reached mid-run. Stopping.")
@@ -409,6 +441,16 @@ def main(argv=None):
         if ticker_counts.get(ticker, 0) >= MAX_NEWS_PER_TICKER_PER_DAY:
             skipped_ticker_cap += 1
             continue
+        if attempts >= MAX_ATTEMPTS_PER_RUN:
+            logger.warning(
+                "Plafond de %d tentatives atteint pour ce run (succes+echecs "
+                "confondus) -- arret, meme si le quota quotidien (%d/%d) "
+                "n'est pas atteint. %d news restantes pour un prochain run.",
+                MAX_ATTEMPTS_PER_RUN, get_usage(conn, today), DAILY_CALL_LIMIT,
+                len(to_analyse) - attempts)
+            break
+
+        attempts += 1
         try:
             result = analyse_with_retry(client, ticker, title, summary)
         except Exception as exc:  # noqa: BLE001
@@ -419,11 +461,13 @@ def main(argv=None):
                     analysed, exc)
                 break
             logger.error("news_id=%s: LLM call failed (%s)", news_id, exc)
-            failed += 1
+            if _note_failure():
+                break
             continue
 
         if result is None:
-            failed += 1
+            if _note_failure():
+                break
             continue
 
         result.update({"news_id": news_id, "model": GROQ_MODEL})
@@ -433,10 +477,12 @@ def main(argv=None):
         except sqlite3.Error as exc:
             conn.rollback()
             logger.error("news_id=%s: insert failed (%s)", news_id, exc)
-            failed += 1
+            if _note_failure():
+                break
             continue
 
         bump_usage(conn, today)
+        consecutive_failures = 0
         ticker_counts[ticker] = ticker_counts.get(ticker, 0) + 1
         analysed += 1
         if analysed % 10 == 0:
@@ -445,9 +491,10 @@ def main(argv=None):
 
     logger.info(
         "Done. Analysed %d, failed %d, skipped %d (plafond %d/ticker/jour "
-        "atteint). Calls used today: %d/%d. Tickers touches aujourd'hui: %d.",
+        "atteint), %d tentatives au total. Calls used today: %d/%d. "
+        "Tickers touches aujourd'hui: %d.",
         analysed, failed, skipped_ticker_cap, MAX_NEWS_PER_TICKER_PER_DAY,
-        get_usage(conn, today), DAILY_CALL_LIMIT, len(ticker_counts),
+        attempts, get_usage(conn, today), DAILY_CALL_LIMIT, len(ticker_counts),
     )
     conn.close()
     return 0

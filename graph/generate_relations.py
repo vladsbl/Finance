@@ -84,6 +84,16 @@ from universe.fix_ticker_mapping import (  # noqa: E402
 from reasoning.daily_summary import (  # noqa: E402
     _create_usage_table_sql, bump_usage, get_usage,
 )
+# GROQ_MODEL/MAX_RETRIES/BACKOFF_BASE/MAX_ATTEMPTS_PER_RUN/
+# MAX_CONSECUTIVE_FAILURES: shared across every Groq-calling module -- see
+# reasoning/groq_config.py's own docstring.
+from reasoning.groq_config import (  # noqa: E402
+    BACKOFF_BASE,
+    GROQ_MODEL,
+    MAX_ATTEMPTS_PER_RUN,
+    MAX_CONSECUTIVE_FAILURES,
+    MAX_RETRIES,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,10 +103,6 @@ logging.basicConfig(
 logger = logging.getLogger("generate_relations")
 
 # --- Configuration -----------------------------------------------------------
-
-GROQ_MODEL = "llama-3.3-70b-versatile"
-MAX_RETRIES = 5
-BACKOFF_BASE = 2.0
 
 USAGE_TABLE_RELATIONS_GEN = "llm_usage_relations_generation"
 # Deliberately generous relative to the other pools (llm_usage_summary=3,
@@ -731,10 +737,37 @@ def main(argv=None):
     pays_map = dict(conn.execute("SELECT ticker, pays FROM universe"))
 
     processed, failed, total_tokens = 0, 0, 0
+    attempts = 0
+    consecutive_failures = 0
+
+    def _note_failure():
+        """Record one failed attempt; True once MAX_CONSECUTIVE_FAILURES
+        have happened in a row -- the backstop bump_usage()'s success-only
+        counter can never provide on its own (see reasoning/groq_config.py
+        -- a deprecated/renamed model returning an error on every call
+        would otherwise never trip the quota check)."""
+        nonlocal failed, consecutive_failures
+        failed += 1
+        consecutive_failures += 1
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            logger.error(
+                "%d echecs Groq consecutifs -- arret (modele/API probablement "
+                "indisponible ou modele deprecie, voir reasoning/groq_config.py).",
+                consecutive_failures)
+            return True
+        return False
+
     for ticker in sample:
         if get_usage(conn, USAGE_TABLE_RELATIONS_GEN, today) >= RELATIONS_GEN_DAILY_LIMIT:
             logger.warning("Quota atteint en cours de run. Arret.")
             break
+        if attempts >= MAX_ATTEMPTS_PER_RUN:
+            logger.warning(
+                "Plafond de %d tentatives atteint pour ce run -- arret, "
+                "meme si le quota quotidien (%d/%d) n'est pas atteint.",
+                MAX_ATTEMPTS_PER_RUN, processed, RELATIONS_GEN_DAILY_LIMIT)
+            break
+        attempts += 1
 
         nom_entreprise = universe_rows.get(ticker) or ticker
         sector = sector_map.get(ticker)
@@ -749,11 +782,13 @@ def main(argv=None):
                     "%d ticker(s) traite(s). Arret du run: %s", processed, exc)
                 break
             logger.error("%s: appel LLM echoue (%s)", ticker, exc)
-            failed += 1
+            if _note_failure():
+                break
             continue
 
         if not raw:
-            failed += 1
+            if _note_failure():
+                break
             continue
         if tokens:
             total_tokens += tokens
@@ -764,10 +799,12 @@ def main(argv=None):
         except sqlite3.Error as exc:
             conn.rollback()
             logger.error("%s: insertion echouee (%s)", ticker, exc)
-            failed += 1
+            if _note_failure():
+                break
             continue
 
         bump_usage(conn, USAGE_TABLE_RELATIONS_GEN, today)
+        consecutive_failures = 0
         processed += 1
         n_resolved = sum(1 for r in rows if r["resolved"])
         logger.info("%s (%s, secteur=%s) : %d relation(s) proposee(s), "
