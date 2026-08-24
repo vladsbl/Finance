@@ -28,6 +28,11 @@ of these, one gets filled in per migration step):
     6. Raisonnement causal  (api/routers/causal_reasoning.py)
     7. News & Analyse IA    (api/routers/news.py)
 
+Plus one route group that is not a migrated page: api/routers/pipeline.py
+(POST /api/pipeline/run, GET /api/pipeline/status) lets the React UI
+trigger and follow pipeline/run_daily.py, which until now could only be
+started from a terminal or Windows Task Scheduler.
+
 Run locally (from the repo root, with the project's venv active):
     uvicorn api.main:app --reload --port 8000
 
@@ -58,6 +63,7 @@ from api.routers import (  # noqa: E402
     graph,
     news,
     opportunities,
+    pipeline,
     stock,
 )
 
@@ -99,6 +105,7 @@ app.include_router(graph.router)
 app.include_router(correlations.router)
 app.include_router(causal_reasoning.router)
 app.include_router(news.router)
+app.include_router(pipeline.router)
 
 
 @app.get("/api/health")

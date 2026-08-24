@@ -7,6 +7,7 @@ import type {
   ManualRelation,
   ManualRelationsResponse,
   OpportunitesResponse,
+  PipelineState,
   Priorite,
   StockChartResponse,
   StockDetail,
@@ -149,3 +150,14 @@ export function fetchCorrelations(
   return getJson<CorrelationsResponse>(`/correlations?${params.toString()}`)
 }
 
+// --- /api/pipeline ------------------------------------------------------------
+
+export function fetchPipelineStatus(): Promise<PipelineState> {
+  return getJson<PipelineState>('/pipeline/status')
+}
+
+// Returns as soon as the pipeline has been LAUNCHED (HTTP 202), not when it
+// finishes -- the caller polls fetchPipelineStatus from there.
+export function runPipeline(): Promise<PipelineState> {
+  return postJson<PipelineState>('/pipeline/run', {})
+}

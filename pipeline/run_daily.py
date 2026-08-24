@@ -59,9 +59,10 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
 
-LOG_DIR = os.path.join(REPO_ROOT, "data", "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOG_DIR, "run_daily.log")
+# Log path lives in pipeline/run_log.py, which also owns the parser that
+# reads these very lines back (api/routers/pipeline.py's status route) --
+# defined once there so the writer and the reader can never drift apart.
+from pipeline.run_log import LOG_FILE  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,

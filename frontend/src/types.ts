@@ -221,3 +221,43 @@ export interface CorrelationsResponse {
   offset: number
 }
 
+// Mirrors api/routers/pipeline.py exactly.
+
+export type PipelineStatus = 'idle' | 'running' | 'success' | 'failed'
+
+export interface PipelineStepInfo {
+  name: string
+  status: 'ok' | 'failed'
+  elapsed: number
+  error: string | null
+}
+
+// Parsed out of data/logs/run_daily.log by pipeline/run_log.py, so it stays
+// populated across an API restart -- and covers runs started by Windows
+// Task Scheduler, which the API process never saw launch.
+export interface PipelineLastRun {
+  // Times only, no date: run_daily.py logs with datefmt "%H:%M:%S".
+  // log_modified_at is the one real datetime available.
+  log_time_start: string
+  log_time_end: string | null
+  completed: boolean
+  steps: PipelineStepInfo[]
+  steps_total: number
+  steps_done: number
+  n_ok: number
+  n_failed: number
+  current_step: string | null
+  duree_secondes: number | null
+  log_modified_at: string
+}
+
+export interface PipelineState {
+  task_id: string | null
+  status: PipelineStatus
+  started_at: string | null
+  finished_at: string | null
+  returncode: number | null
+  error: string | null
+  last_run: PipelineLastRun | null
+  log_file: string
+}

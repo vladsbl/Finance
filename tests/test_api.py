@@ -718,3 +718,225 @@ def test_correlations_search_paginates_the_filtered_set():
     ids2 = [r["id"] for r in page2["correlations"]]
     assert set(ids1).isdisjoint(ids2)
     assert ids1 + ids2 == [r["id"] for r in full["correlations"][:len(ids1) + len(ids2)]]
+
+
+# --- /api/pipeline -----------------------------------------------------------
+#
+# The real pipeline is NEVER launched here. api/routers/pipeline.py funnels
+# every launch through a single _spawn() seam precisely so these tests can
+# replace it with a fake process object: nothing in this section ever calls
+# subprocess, touches data/logs/run_daily.log, or writes to the database.
+
+class _FakeProcess:
+    """Stand-in for subprocess.Popen. `returncode_to_report` is what poll()
+    answers: None means still running, an int means the child has exited --
+    flip it mid-test to simulate the pipeline finishing."""
+
+    def __init__(self, returncode_to_report=None):
+        self.returncode_to_report = returncode_to_report
+
+    def poll(self):
+        return self.returncode_to_report
+
+
+def _reset_pipeline_state():
+    """Bring the router's module-level run state back to a fresh boot, so
+    tests never inherit a previous test's 'running' flag."""
+    import api.routers.pipeline as pl
+    pl._run.clear()
+    pl._run.update(pl._IDLE_STATE)
+    pl._process = None
+    return pl
+
+
+def test_pipeline_status_is_idle_before_any_run():
+    _reset_pipeline_state()
+    resp = client.get("/api/pipeline/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "idle"
+    assert body["task_id"] is None
+    assert set(body.keys()) == {
+        "task_id", "status", "started_at", "finished_at", "returncode",
+        "error", "last_run", "log_file",
+    }
+
+
+def test_pipeline_run_returns_202_immediately_with_task_id(monkeypatch):
+    pl = _reset_pipeline_state()
+    monkeypatch.setattr(pl, "_spawn", lambda: _FakeProcess())
+
+    resp = client.post("/api/pipeline/run")
+    assert resp.status_code == 202  # accepted, NOT waited on
+    body = resp.json()
+    assert body["status"] == "running"
+    assert body["task_id"]
+    assert body["started_at"]
+    assert body["finished_at"] is None
+
+
+def test_pipeline_second_run_while_running_returns_409(monkeypatch):
+    """Two pipelines writing to the same SQLite file at once is exactly what
+    this guard exists to prevent -- a double click must not start a second
+    one."""
+    pl = _reset_pipeline_state()
+    monkeypatch.setattr(pl, "_spawn", lambda: _FakeProcess())
+
+    assert client.post("/api/pipeline/run").status_code == 202
+    second = client.post("/api/pipeline/run")
+    assert second.status_code == 409
+    assert "deja en cours" in second.json()["detail"]
+
+
+def test_pipeline_status_stays_running_while_process_alive(monkeypatch):
+    pl = _reset_pipeline_state()
+    monkeypatch.setattr(pl, "_spawn", lambda: _FakeProcess())
+    client.post("/api/pipeline/run")
+
+    body = client.get("/api/pipeline/status").json()
+    assert body["status"] == "running"
+    assert body["returncode"] is None
+
+
+def test_pipeline_status_flips_to_success_when_process_exits_zero(monkeypatch):
+    pl = _reset_pipeline_state()
+    fake = _FakeProcess()
+    monkeypatch.setattr(pl, "_spawn", lambda: fake)
+    client.post("/api/pipeline/run")
+
+    fake.returncode_to_report = 0  # child finished, every step passed
+    body = client.get("/api/pipeline/status").json()
+    assert body["status"] == "success"
+    assert body["returncode"] == 0
+    assert body["finished_at"]
+    assert body["error"] is None
+
+
+def test_pipeline_status_flips_to_failed_when_process_exits_nonzero(monkeypatch):
+    """run_daily.py exits 1 when ANY step failed -- the route reports failure
+    but points at the per-step detail rather than claiming the run crashed."""
+    pl = _reset_pipeline_state()
+    fake = _FakeProcess()
+    monkeypatch.setattr(pl, "_spawn", lambda: fake)
+    client.post("/api/pipeline/run")
+
+    fake.returncode_to_report = 1
+    body = client.get("/api/pipeline/status").json()
+    assert body["status"] == "failed"
+    assert body["returncode"] == 1
+    assert "1" in body["error"]
+    assert body["finished_at"]
+
+
+def test_pipeline_can_run_again_after_previous_run_finished(monkeypatch):
+    pl = _reset_pipeline_state()
+    first = _FakeProcess()
+    monkeypatch.setattr(pl, "_spawn", lambda: first)
+    client.post("/api/pipeline/run")
+    first.returncode_to_report = 0
+    assert client.get("/api/pipeline/status").json()["status"] == "success"
+
+    monkeypatch.setattr(pl, "_spawn", lambda: _FakeProcess())
+    again = client.post("/api/pipeline/run")
+    assert again.status_code == 202
+    assert again.json()["status"] == "running"
+
+
+def test_pipeline_run_reports_500_when_spawn_fails(monkeypatch):
+    pl = _reset_pipeline_state()
+
+    def _boom():
+        raise OSError("interpreteur introuvable")
+
+    monkeypatch.setattr(pl, "_spawn", _boom)
+    resp = client.post("/api/pipeline/run")
+    assert resp.status_code == 500
+    assert "interpreteur introuvable" in resp.json()["detail"]
+    # A failed launch must not leave the guard stuck on "running".
+    assert client.get("/api/pipeline/status").json()["status"] == "idle"
+
+
+# --- pipeline/run_log.py's parser --------------------------------------------
+#
+# The status route's per-step detail is only as good as this parser, and it
+# reads a format owned by another module -- so it is pinned against the exact
+# line shapes run_daily.py's logger produces.
+
+_LOG_FINISHED = [
+    "10:22:15 [INFO] DEBUT DU PIPELINE QUOTIDIEN (9 etapes)",
+    "10:22:15 [INFO] ETAPE : Ingestion des prix (univers complet)",
+    "10:25:03 [INFO] [OK] Ingestion des prix (univers complet) termine en 168.0s.",
+    "10:25:03 [INFO] ETAPE : Collecte des news (univers)",
+    "10:25:10 [ERROR] [ECHEC] Collecte des news (univers) a echoue apres 6.5s : HTTPError 503",
+    "10:30:00 [INFO] BILAN DU PIPELINE QUOTIDIEN",
+    "10:30:00 [INFO]   [OK   ] Ingestion des prix (univers complet)          168.0s",
+    "10:30:00 [INFO]   [ECHEC] Collecte des news (univers)                     6.5s -- HTTPError 503",
+    "10:30:00 [INFO] Total : 8/9 etapes reussies, duree globale 465.0s (7.8 min).",
+]
+
+
+def _write_log(tmp_path, lines):
+    path = tmp_path / "run_daily.log"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def test_parse_last_run_returns_none_when_no_log(tmp_path):
+    from pipeline.run_log import parse_last_run
+    assert parse_last_run(str(tmp_path / "absent.log")) is None
+
+
+def test_parse_last_run_returns_none_when_log_has_no_run_marker(tmp_path):
+    from pipeline.run_log import parse_last_run
+    assert parse_last_run(_write_log(tmp_path, ["12:00:00 [INFO] rien a voir"])) is None
+
+
+def test_parse_last_run_reads_steps_and_totals(tmp_path):
+    from pipeline.run_log import parse_last_run
+    r = parse_last_run(_write_log(tmp_path, _LOG_FINISHED))
+    assert r["completed"] is True
+    assert r["steps_total"] == 9
+    assert r["n_ok"] == 8 and r["n_failed"] == 1
+    assert r["duree_secondes"] == 465.0
+    assert r["current_step"] is None
+    assert [s["status"] for s in r["steps"]] == ["ok", "failed"]
+    assert r["steps"][1]["error"] == "HTTPError 503"
+
+
+def test_parse_last_run_does_not_double_count_the_bilan_recap(tmp_path):
+    """The BILAN section repeats every step as "  [OK   ] name ..." -- close
+    enough to a real step line to be counted twice if the regexes were not
+    anchored right after the log level."""
+    from pipeline.run_log import parse_last_run
+    r = parse_last_run(_write_log(tmp_path, _LOG_FINISHED))
+    assert r["steps_done"] == 2, r["steps"]
+
+
+def test_parse_last_run_reports_the_step_in_progress(tmp_path):
+    from pipeline.run_log import parse_last_run
+    lines = [
+        "11:00:00 [INFO] DEBUT DU PIPELINE QUOTIDIEN (9 etapes)",
+        "11:00:00 [INFO] ETAPE : Ingestion des prix (univers complet)",
+        "11:02:00 [INFO] [OK] Ingestion des prix (univers complet) termine en 120.0s.",
+        "11:02:00 [INFO] ETAPE : Scores techniques (tickers manquants)",
+    ]
+    r = parse_last_run(_write_log(tmp_path, lines))
+    assert r["completed"] is False
+    assert r["current_step"] == "Scores techniques (tickers manquants)"
+    assert r["steps_done"] == 1
+    assert r["log_time_end"] is None
+
+
+def test_parse_last_run_only_reads_the_most_recent_run(tmp_path):
+    """The log is appended to across days -- an older run's steps must not
+    leak into the reported one."""
+    from pipeline.run_log import parse_last_run
+    older = [
+        "09:00:00 [INFO] DEBUT DU PIPELINE QUOTIDIEN (9 etapes)",
+        "09:00:00 [INFO] ETAPE : Vieille etape",
+        "09:00:05 [INFO] [OK] Vieille etape termine en 5.0s.",
+        "09:00:05 [INFO] Total : 9/9 etapes reussies, duree globale 5.0s (0.1 min).",
+    ]
+    r = parse_last_run(_write_log(tmp_path, older + _LOG_FINISHED))
+    assert r["log_time_start"] == "10:22:15"
+    assert all("Vieille" not in s["name"] for s in r["steps"])
