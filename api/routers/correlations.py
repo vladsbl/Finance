@@ -16,6 +16,7 @@ from api.dependencies import get_db
 from reasoning.correlation_discovery import (
     classify_correlation_badge,
     dedupe_mirror_correlations,
+    filter_correlations_by_name,
     format_lag_direction,
     load_correlations,
 )
@@ -52,6 +53,10 @@ def _row_to_dict(row):
 
 @router.get("")
 def get_correlations(
+    search: str | None = Query(
+        None,
+        description="Filtre par nom d'entreprise (source OU cible), partiel et insensible a la casse",
+    ),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Lignes par page"),
     offset: int = Query(0, ge=0, description="Nombre de lignes a sauter"),
     conn=Depends(get_db),
@@ -62,22 +67,34 @@ def get_correlations(
     mirror pairs collapsed into one row each (dedupe_mirror_correlations)
     exactly like the Streamlit page.
 
-    `n_before_dedup` is the raw stored row count (before collapsing mirror
-    pairs) -- the Streamlit page shows both numbers ("N retenues... M
-    affichees") so this route does too, letting the frontend reproduce
-    that same caption. `limit`/`offset` paginate the already-deduped,
+    `search` filters on the two COMPANY NAMES (see
+    filter_correlations_by_name), not on tickers -- applied AFTER dedup so
+    `n_total` is directly the number of rows the caller can page through.
+    Filtering before dedup would select the identical set anyway (both
+    mirror rows of a pair carry the same two tickers, so they always match
+    or miss together), so doing it after is purely the simpler of two
+    equivalent orders.
+
+    `n_before_dedup` stays the GLOBAL raw stored row count, unaffected by
+    `search` -- it describes the dataset ("N correlations retenues"), not
+    the current view, and pairs with `n_total` to reproduce the Streamlit
+    page's "N retenues... M affichees" caption. With a search active the
+    frontend shows a match count instead, since that caption no longer
+    describes what is on screen. `limit`/`offset` paginate the filtered,
     already-sorted list, same convention as /api/opportunities."""
     rows = load_correlations(conn)
     n_before_dedup = len(rows)
     deduped = dedupe_mirror_correlations(rows)
+    matching = filter_correlations_by_name(deduped, search)
 
-    n_total = len(deduped)
-    page = deduped[offset:offset + limit]
+    n_total = len(matching)
+    page = matching[offset:offset + limit]
 
     return {
         "correlations": [_row_to_dict(r) for r in page],
         "n_before_dedup": n_before_dedup,
         "n_total": n_total,
+        "search": (search or "").strip() or None,
         "limit": limit,
         "offset": offset,
     }

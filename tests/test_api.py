@@ -502,7 +502,10 @@ def test_correlations_returns_expected_top_level_shape():
     resp = client.get("/api/correlations")
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"correlations", "n_before_dedup", "n_total", "limit", "offset"}
+    assert set(body.keys()) == {
+        "correlations", "n_before_dedup", "n_total", "search", "limit", "offset",
+    }
+    assert body["search"] is None  # no ?search= given -> no filter applied
     assert isinstance(body["correlations"], list)
     assert body["n_before_dedup"] >= body["n_total"]  # dedup only ever collapses, never adds rows
 
@@ -603,3 +606,115 @@ def test_correlations_limit_beyond_max_returns_422():
 def test_correlations_negative_offset_returns_422():
     resp = client.get("/api/correlations", params={"offset": -1})
     assert resp.status_code == 422
+
+
+# --- /api/correlations?search= -----------------------------------------------
+#
+# "Apple" is used as the reference query: AAPL is part of the hand-curated
+# pilot seed and has several stored correlations, confirmed against the real
+# DB. Assertions check the FILTER'S CONTRACT (every returned row really has
+# the term in one of its two names, counts shrink, n_before_dedup stays
+# global) rather than an exact match count, which a future
+# correlation_discovery.py run could legitimately change.
+
+def _names_of(row):
+    return (row["nom_source"].casefold(), row["nom_target"].casefold())
+
+
+def test_correlations_search_filters_by_company_name():
+    resp = client.get("/api/correlations", params={"search": "Apple", "limit": 500})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["search"] == "Apple"
+    assert body["n_total"] > 0, "AAPL should have at least one stored correlation"
+    for row in body["correlations"]:
+        assert any("apple" in n for n in _names_of(row)), row
+
+
+def test_correlations_search_matches_source_or_target_side():
+    """The filter must be an OR across the two sides, not just the source --
+    AAPL appears as ticker_source in some stored pairs and as ticker_target
+    in others."""
+    body = client.get("/api/correlations", params={"search": "Apple", "limit": 500}).json()
+    rows = body["correlations"]
+    if len(rows) < 2:
+        return  # too little data in this environment to show both sides
+    matched_on_source = any("apple" in r["nom_source"].casefold() for r in rows)
+    matched_on_target = any("apple" in r["nom_target"].casefold() for r in rows)
+    assert matched_on_source and matched_on_target
+
+
+def test_correlations_search_is_case_insensitive():
+    variants = ["Apple", "apple", "APPLE", "aPpLe"]
+    totals = {
+        v: client.get("/api/correlations", params={"search": v, "limit": 500}).json()["n_total"]
+        for v in variants
+    }
+    assert len(set(totals.values())) == 1, totals
+
+
+def test_correlations_search_matches_partial_name():
+    """A prefix of the real name must match -- the point of the search box is
+    not having to type the exact registered company name."""
+    partial = client.get("/api/correlations", params={"search": "Appl", "limit": 500}).json()
+    full = client.get("/api/correlations", params={"search": "Apple", "limit": 500}).json()
+    assert partial["n_total"] >= full["n_total"] > 0
+
+
+def test_correlations_search_is_trimmed_and_echoed():
+    body = client.get("/api/correlations", params={"search": "  Apple  "}).json()
+    assert body["search"] == "Apple"
+
+
+def test_correlations_blank_search_behaves_like_no_search():
+    no_search = client.get("/api/correlations", params={"limit": 1}).json()
+    blank = client.get("/api/correlations", params={"search": "   ", "limit": 1}).json()
+    assert blank["search"] is None
+    assert blank["n_total"] == no_search["n_total"]
+
+
+def test_correlations_search_narrows_the_result_set():
+    unfiltered = client.get("/api/correlations", params={"limit": 1}).json()
+    filtered = client.get("/api/correlations", params={"search": "Apple", "limit": 1}).json()
+    assert 0 < filtered["n_total"] < unfiltered["n_total"]
+
+
+def test_correlations_search_leaves_n_before_dedup_global():
+    """n_before_dedup describes the whole dataset, not the filtered view --
+    the frontend pairs it with n_total to say "N matches out of M stored"."""
+    unfiltered = client.get("/api/correlations", params={"limit": 1}).json()
+    filtered = client.get("/api/correlations", params={"search": "Apple", "limit": 1}).json()
+    assert filtered["n_before_dedup"] == unfiltered["n_before_dedup"]
+
+
+def test_correlations_search_with_no_match_returns_empty_not_error():
+    resp = client.get("/api/correlations", params={"search": "zzzz-aucune-entreprise-zzzz"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["correlations"] == []
+    assert body["n_total"] == 0
+    assert body["search"] == "zzzz-aucune-entreprise-zzzz"
+
+
+def test_correlations_search_still_sorted_by_abs_coefficient():
+    body = client.get("/api/correlations", params={"search": "Energy", "limit": 500}).json()
+    coeffs = [abs(r["coefficient"]) for r in body["correlations"]]
+    assert coeffs == sorted(coeffs, reverse=True)
+
+
+def test_correlations_search_paginates_the_filtered_set():
+    """limit/offset must page through the MATCHES, not through the full list
+    then filter -- otherwise page 2 of a search could come back empty while
+    n_total claims there are more."""
+    term = "Energy"
+    full = client.get("/api/correlations", params={"search": term, "limit": 500}).json()
+    if full["n_total"] <= 5:
+        return  # not enough matches to paginate meaningfully
+    page1 = client.get("/api/correlations", params={"search": term, "limit": 5, "offset": 0}).json()
+    page2 = client.get("/api/correlations", params={"search": term, "limit": 5, "offset": 5}).json()
+    assert page1["n_total"] == page2["n_total"] == full["n_total"]
+    assert len(page1["correlations"]) == 5
+    ids1 = [r["id"] for r in page1["correlations"]]
+    ids2 = [r["id"] for r in page2["correlations"]]
+    assert set(ids1).isdisjoint(ids2)
+    assert ids1 + ids2 == [r["id"] for r in full["correlations"][:len(ids1) + len(ids2)]]

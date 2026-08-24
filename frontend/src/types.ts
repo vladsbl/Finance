@@ -213,6 +213,11 @@ export interface CorrelationsResponse {
   correlations: Correlation[]
   n_before_dedup: number
   n_total: number
+  // Echo of the applied name filter, normalised server-side (trimmed, null
+  // when absent) -- lets the UI caption say what it actually filtered on
+  // rather than re-deriving it from its own input state.
+  search: string | null
   limit: number
   offset: number
 }
+

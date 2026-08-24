@@ -462,6 +462,34 @@ def load_correlations(conn):
     return rows
 
 
+def filter_correlations_by_name(rows, search):
+    """Keep only the pairs where EITHER side's company display name contains
+    `search` (case-insensitive substring match).
+
+    Matches on nom_source/nom_target -- the real company names already
+    resolved by load_correlations -- never on the raw ticker: a reader
+    looking for "Apple" should not have to know it trades as AAPL. (A
+    ticker typed in anyway still matches wherever nom_affiche fell back to
+    the bare ticker for want of a known company name; that fallback is
+    load_all_tickers_with_names's, not a second lookup here.)
+
+    casefold() rather than lower() so the match also works for the
+    non-ASCII company names in this universe (accented European names,
+    German eszett, ...).
+
+    An empty/whitespace-only `search` returns `rows` unchanged, so a caller
+    can pass an unset query parameter straight through without branching.
+    """
+    if not search or not search.strip():
+        return rows
+    needle = search.strip().casefold()
+    return [
+        row for row in rows
+        if needle in (row["nom_source"] or "").casefold()
+        or needle in (row["nom_target"] or "").casefold()
+    ]
+
+
 # Same-market lag!=0 pairs where a MUCH stronger simultaneous (lag=0)
 # correlation for the identical pair is already known (ESS/AVB and ESS/EQR:
 # lag=0 coefficient ~4x the lag!=0 one) -- a classic mean-reversion pattern

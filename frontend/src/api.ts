@@ -136,7 +136,16 @@ export function deleteManualRelation(id: number): Promise<{ deleted: boolean; id
 
 // --- /api/correlations --------------------------------------------------------
 
-export function fetchCorrelations(limit = 50, offset = 0): Promise<CorrelationsResponse> {
+export function fetchCorrelations(
+  limit = 50,
+  offset = 0,
+  search = '',
+): Promise<CorrelationsResponse> {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  // Omitted entirely when blank: the backend treats an empty ?search= as
+  // "no filter" anyway, so sending it would only make the default view's
+  // URLs (and the network log) noisier for no behavioural difference.
+  if (search.trim()) params.set('search', search.trim())
   return getJson<CorrelationsResponse>(`/correlations?${params.toString()}`)
 }
+

@@ -13,6 +13,10 @@ type CorrState =
 // actually requested.
 const PAGE_SIZE = 50
 
+// Long enough that typing a word fires ONE request instead of one per
+// character, short enough that the table still feels responsive.
+const SEARCH_DEBOUNCE_MS = 300
+
 const BADGE_STYLES: Record<CorrelationBadge['severity'], string> = {
   warning: 'bg-amber-100 text-amber-800',
   info: 'bg-blue-50 text-blue-700',
@@ -27,19 +31,6 @@ const BADGE_LABELS: Record<CorrelationBadge['type'], string> = {
 const BADGE_ICONS: Record<CorrelationBadge['severity'], string> = {
   warning: '⚠',
   info: 'ℹ',
-}
-
-function loadCorrelations(page: number, setState: (s: CorrState) => void) {
-  setState({ status: 'loading' })
-  fetchCorrelations(PAGE_SIZE, page * PAGE_SIZE)
-    .then((data) => setState({ status: 'ready', data }))
-    .catch((err) => {
-      const message =
-        err instanceof ApiError
-          ? err.message
-          : 'Erreur inattendue lors du chargement des correlations.'
-      setState({ status: 'error', message })
-    })
 }
 
 function formatCoefficient(coef: number): string {
@@ -64,12 +55,49 @@ function BadgePill({ badge }: { badge: Correlation['badge'] }) {
 }
 
 export function CorrelationsPage() {
+  // `search` is what is in the input -- updated on every keystroke so the
+  // field stays responsive. `appliedSearch` is what has actually been sent
+  // to the API, updated only once typing pauses (debounce effect below).
+  const [search, setSearch] = useState('')
+  const [appliedSearch, setAppliedSearch] = useState('')
   const [page, setPage] = useState(0)
+  // Bumped by the "Reessayer" button to re-run the fetch effect without
+  // changing the page or the search.
+  const [reloadKey, setReloadKey] = useState(0)
   const [state, setState] = useState<CorrState>({ status: 'loading' })
 
+  // Debounce. The pagination reset lives HERE rather than in the input's
+  // onChange so it is tied to the search actually being applied; React
+  // batches both setStates, so the fetch effect below still runs once.
   useEffect(() => {
-    loadCorrelations(page, setState)
-  }, [page])
+    const timer = setTimeout(() => {
+      setAppliedSearch(search)
+      setPage(0)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [search])
+
+  useEffect(() => {
+    // A slower earlier request must never overwrite a newer one's result:
+    // when searching as you type, "App" can easily resolve after "Apple".
+    let cancelled = false
+    setState({ status: 'loading' })
+    fetchCorrelations(PAGE_SIZE, page * PAGE_SIZE, appliedSearch)
+      .then((data) => {
+        if (!cancelled) setState({ status: 'ready', data })
+      })
+      .catch((err) => {
+        if (cancelled) return
+        const message =
+          err instanceof ApiError
+            ? err.message
+            : 'Erreur inattendue lors du chargement des correlations.'
+        setState({ status: 'error', message })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [page, appliedSearch, reloadKey])
 
   return (
     <div>
@@ -81,6 +109,43 @@ export function CorrelationsPage() {
         raisons qu'un lien economique direct : secteur commun, sentiment de marche general, ou
         simple coincidence statistique. Ces resultats servent a orienter l'attention vers des
         paires deja liees dans le graphe de connaissances -- jamais a predire un mouvement futur.
+      </div>
+
+      <div className="mt-6">
+        <label
+          htmlFor="correlation-search"
+          className="mb-1 block text-sm font-medium text-gray-700"
+        >
+          Rechercher une entreprise
+        </label>
+        {/* Free text, not the TickerSearch autocomplete used on the other
+            pages: here the point is to search by COMPANY NAME without
+            knowing the ticker, and a partial name ("Energy") is a
+            legitimate query meant to match many pairs at once -- an
+            exact-pick autocomplete would defeat that. */}
+        <div className="relative w-full max-w-md">
+          <input
+            id="correlation-search"
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Nom d'entreprise (ex: Apple, Energy...)"
+            className="w-full rounded-md border border-gray-300 px-3 py-2 pr-20 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          />
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-2 py-0.5 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+            >
+              Effacer
+            </button>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-gray-500">
+          Recherche sur le NOM de l'entreprise (partielle, insensible a la casse) : affiche les
+          paires dont l'une des deux entreprises correspond.
+        </p>
       </div>
 
       {state.status === 'loading' && (
@@ -99,7 +164,7 @@ export function CorrelationsPage() {
           <p className="mt-1 text-sm">{state.message}</p>
           <button
             type="button"
-            onClick={() => loadCorrelations(page, setState)}
+            onClick={() => setReloadKey((k) => k + 1)}
             className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
           >
             Reessayer
@@ -110,16 +175,47 @@ export function CorrelationsPage() {
       {state.status === 'ready' && (
         <>
           <p className="mt-4 text-sm text-gray-500">
-            {state.data.n_before_dedup} correlation(s) retenue(s) (p-value corrigee &lt; 0.05,
-            apres correction pour tests multiples). {state.data.n_total} affichee(s) ci-dessous
-            (paires symetriques du Knowledge Graph fusionnees en une seule ligne), triees par
-            force de correlation decroissante.
+            {state.data.search ? (
+              <>
+                {state.data.n_total} paire(s) impliquant une entreprise dont le nom contient
+                &laquo;&nbsp;{state.data.search}&nbsp;&raquo;, sur {state.data.n_before_dedup}{' '}
+                correlation(s) retenue(s) au total, triees par force de correlation
+                decroissante.
+              </>
+            ) : (
+              <>
+                {state.data.n_before_dedup} correlation(s) retenue(s) (p-value corrigee &lt;
+                0.05, apres correction pour tests multiples). {state.data.n_total} affichee(s)
+                ci-dessous (paires symetriques du Knowledge Graph fusionnees en une seule
+                ligne), triees par force de correlation decroissante.
+              </>
+            )}
           </p>
 
           {state.data.correlations.length === 0 ? (
-            <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
-              Aucune correlation calculee pour l'instant.
-            </div>
+            state.data.search ? (
+              <div className="mt-8 rounded-md border border-amber-200 bg-amber-50 p-4 text-amber-900">
+                <p className="font-medium">
+                  Aucune paire ne correspond a &laquo;&nbsp;{state.data.search}&nbsp;&raquo;.
+                </p>
+                <p className="mt-1 text-sm">
+                  La recherche porte sur le NOM de l'entreprise (pas le ticker), et seules les
+                  paires ayant une correlation retenue apparaissent ici. Essayez un nom plus
+                  court, ou une autre entreprise.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  className="mt-3 rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700"
+                >
+                  Effacer la recherche
+                </button>
+              </div>
+            ) : (
+              <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+                Aucune correlation calculee pour l'instant.
+              </div>
+            )
           ) : (
             <div className="mt-4 overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200 text-sm">
