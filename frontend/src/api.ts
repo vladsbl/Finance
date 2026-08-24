@@ -1,6 +1,9 @@
 import type {
   AddRelationPayload,
   ArguedTextResponse,
+  CausalChainsResponse,
+  CausalReasoningRunStats,
+  CausalReasoningStatus,
   CorrelationsResponse,
   DailySummaryResponse,
   GraphResponse,
@@ -160,4 +163,22 @@ export function fetchPipelineStatus(): Promise<PipelineState> {
 // finishes -- the caller polls fetchPipelineStatus from there.
 export function runPipeline(): Promise<PipelineState> {
   return postJson<PipelineState>('/pipeline/run', {})
+}
+
+// --- /api/causal-reasoning -----------------------------------------------------
+
+export function fetchCausalChains(limit = 50): Promise<CausalChainsResponse> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  return getJson<CausalChainsResponse>(`/causal-reasoning?${params.toString()}`)
+}
+
+export function fetchCausalReasoningStatus(): Promise<CausalReasoningStatus> {
+  return getJson<CausalReasoningStatus>('/causal-reasoning/status')
+}
+
+// Runs synchronously server-side (quota-capped at 5/day, unlike the
+// minutes-long pipeline run) -- this resolves once generation is done, no
+// polling needed.
+export function runCausalReasoning(): Promise<CausalReasoningRunStats> {
+  return postJson<CausalReasoningRunStats>('/causal-reasoning/run', {})
 }

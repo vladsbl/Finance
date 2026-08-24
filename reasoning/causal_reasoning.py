@@ -556,6 +556,65 @@ def run_causal_reasoning(conn, limit=None, threshold=IMPORTANCE_THRESHOLD):
     return stats
 
 
+# --- Read helpers (dashboard "Raisonnement causal" page + API) -----------------
+#
+# Relocated from dashboard/app.py: these were already conn-first/pure
+# functions with no Streamlit dependency, so this is a straight move (no
+# rewrite) -- dashboard/app.py now imports them from here instead of
+# defining them locally, so the API (api/routers/causal_reasoning.py) and
+# the Streamlit page share the exact same load/status/parse logic.
+
+CAUSAL_CHAINS_SQL = """
+SELECT c.id, c.news_id, c.ticker_source, c.chaine_raisonnement,
+       c.entreprises_impactees, c.confiance, c.model, c.created_at,
+       r.title AS news_title
+FROM causal_chains c
+LEFT JOIN news_raw r ON r.id = c.news_id
+ORDER BY c.created_at DESC
+LIMIT ?;
+"""
+
+CAUSAL_CHAIN_DISPLAY_LIMIT = 50
+
+
+def load_causal_chains(conn, limit=CAUSAL_CHAIN_DISPLAY_LIMIT):
+    """Stored causal chains, most recently generated first -- never
+    restricted to a single "today" date the way Resume du jour is: this
+    module runs on its own limited daily quota
+    (CAUSAL_REASONING_DAILY_LIMIT), so a chain generated a few days ago is
+    still the right thing to show, not a reason to show nothing. Each row
+    also carries the originating news's title (news_title, None if the
+    news_raw row is gone)."""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(CAUSAL_CHAINS_SQL, (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def parse_entreprises_impactees(raw_json):
+    """[] on anything that isn't a valid JSON array -- never crash a caller
+    over a malformed cell."""
+    if not raw_json:
+        return []
+    try:
+        parsed = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def causal_reasoning_status(conn):
+    """(n_pending, quota_used, quota_limit, quota_remaining) for the
+    "Recalculer maintenant" button -- a lightweight query, meant to be
+    recomputed fresh right before a caller decides whether to offer the
+    button (never cached), so the numbers shown are always accurate right
+    before a click."""
+    candidates = load_eligible_news(conn, threshold=IMPORTANCE_THRESHOLD)
+    today = date.today().isoformat()
+    used = get_usage(conn, USAGE_TABLE_CAUSAL, today)
+    remaining = max(0, CAUSAL_REASONING_DAILY_LIMIT - used)
+    return len(candidates), used, CAUSAL_REASONING_DAILY_LIMIT, remaining
+
+
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
 

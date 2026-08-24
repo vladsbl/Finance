@@ -1,5 +1,6 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { NavBar } from './components/NavBar'
+import { CausalReasoningPage } from './pages/CausalReasoningPage'
 import { CorrelationsPage } from './pages/CorrelationsPage'
 import { DailySummaryPage } from './pages/DailySummaryPage'
 import { GraphPage } from './pages/GraphPage'
@@ -17,6 +18,7 @@ function App() {
           <Route path="/stock" element={<StockPage />} />
           <Route path="/graph" element={<GraphPage />} />
           <Route path="/correlations" element={<CorrelationsPage />} />
+          <Route path="/causal-reasoning" element={<CausalReasoningPage />} />
         </Routes>
       </div>
     </BrowserRouter>

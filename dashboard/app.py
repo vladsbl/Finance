@@ -45,8 +45,11 @@ from reasoning.daily_summary import (  # noqa: E402
     staleness_note, staleness_summary,
 )
 from reasoning.causal_reasoning import (  # noqa: E402
-    CAUSAL_REASONING_DAILY_LIMIT, IMPORTANCE_THRESHOLD, USAGE_TABLE_CAUSAL,
-    load_eligible_news, run_causal_reasoning,
+    CAUSAL_REASONING_DAILY_LIMIT, USAGE_TABLE_CAUSAL,
+    causal_reasoning_status as _causal_reasoning_status,
+    load_causal_chains as _load_causal_chains_rows,
+    parse_entreprises_impactees as _parse_entreprises_impactees,
+    run_causal_reasoning,
 )
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
@@ -1345,64 +1348,26 @@ def render_daily_summary_page():
 
 # --- Raisonnement causal (module 7) -------------------------------------------
 
-CAUSAL_CHAINS_SQL = """
-SELECT c.id, c.news_id, c.ticker_source, c.chaine_raisonnement,
-       c.entreprises_impactees, c.confiance, c.model, c.created_at,
-       r.title AS news_title
-FROM causal_chains c
-LEFT JOIN news_raw r ON r.id = c.news_id
-ORDER BY c.created_at DESC
-LIMIT ?;
-"""
-
 CAUSAL_CHAIN_DISPLAY_LIMIT = 50
 
 
 @st.cache_data(show_spinner=False)
 def load_causal_chains(limit=CAUSAL_CHAIN_DISPLAY_LIMIT):
-    """Return (chains, error). `chains` is a list of dicts, most recently
-    generated first -- never restricted to a single "today" date the way
-    Resume du jour is: causal_reasoning.py runs on its own limited quota
-    (see reasoning/causal_reasoning.py's CAUSAL_REASONING_DAILY_LIMIT), so a
-    chain generated a few days ago is still the right thing to show, not a
-    reason to show nothing."""
+    """Return (chains, error) -- thin cached wrapper around
+    reasoning.causal_reasoning.load_causal_chains, same pattern as
+    load_correlations/load_opportunites_multi's own dashboard wrappers."""
     if not os.path.exists(DB_PATH):
         return [], None
     try:
         conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(CAUSAL_CHAINS_SQL, (limit,)).fetchall()
+        chains = _load_causal_chains_rows(conn, limit)
         conn.close()
     except sqlite3.Error as exc:
         return [], str(exc)
-    return [dict(r) for r in rows], None
-
-
-def _parse_entreprises_impactees(raw_json):
-    """[] on anything that isn't a valid JSON array -- never crash the page
-    over a malformed cell."""
-    if not raw_json:
-        return []
-    try:
-        parsed = json.loads(raw_json)
-    except (TypeError, ValueError):
-        return []
-    return parsed if isinstance(parsed, list) else []
+    return chains, None
 
 
 EFFET_COLOR = {"positif": COLOR_GOOD, "negatif": COLOR_BAD, "neutre": COLOR_MID}
-
-
-def _causal_reasoning_status(conn):
-    """(n_pending, quota_used, quota_limit, quota_remaining) for the
-    "Recalculer maintenant" button -- a lightweight SQL query, recomputed
-    fresh on every page load (not cached) so the numbers shown are always
-    accurate right before the user decides whether to click."""
-    candidates = load_eligible_news(conn, threshold=IMPORTANCE_THRESHOLD)
-    today = date.today().isoformat()
-    used = get_usage(conn, USAGE_TABLE_CAUSAL, today)
-    remaining = max(0, CAUSAL_REASONING_DAILY_LIMIT - used)
-    return len(candidates), used, CAUSAL_REASONING_DAILY_LIMIT, remaining
 
 
 def _render_causal_recalc_button():

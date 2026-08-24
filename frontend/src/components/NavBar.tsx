@@ -7,6 +7,7 @@ const LINKS = [
   { to: '/stock', label: "Analyse d'une action" },
   { to: '/graph', label: 'Knowledge Graph' },
   { to: '/correlations', label: 'Correlations decouvertes' },
+  { to: '/causal-reasoning', label: 'Raisonnement causal' },
 ]
 
 export function NavBar() {

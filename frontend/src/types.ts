@@ -261,3 +261,51 @@ export interface PipelineState {
   last_run: PipelineLastRun | null
   log_file: string
 }
+
+// Mirrors api/routers/causal_reasoning.py exactly.
+
+export type EffetImpact = 'positif' | 'negatif' | 'neutre'
+
+export interface EntrepriseImpactee {
+  entreprise: string
+  ticker?: string | null
+  effet: EffetImpact | string
+}
+
+export interface CausalChain {
+  id: number
+  news_id: number
+  news_title: string | null
+  ticker_source: string
+  chaine_raisonnement: string
+  entreprises_impactees: EntrepriseImpactee[]
+  confiance: number | null
+  model: string | null
+  created_at: string
+}
+
+export interface CausalChainsResponse {
+  chains: CausalChain[]
+  n_total: number
+  staleness: string | null
+}
+
+export interface CausalReasoningStatus {
+  n_pending: number
+  quota_used: number
+  quota_limit: number
+  quota_remaining: number
+}
+
+// Same shape as reasoning/causal_reasoning.py's run_causal_reasoning() stats
+// dict, returned as-is by POST /api/causal-reasoning/run.
+export interface CausalReasoningRunStats {
+  n_candidates: number
+  processed: number
+  failed: number
+  skipped_no_relations: number
+  quota_used: number
+  quota_limit: number
+  quota_exhausted: boolean
+  error: string | null
+}

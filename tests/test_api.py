@@ -940,3 +940,118 @@ def test_parse_last_run_only_reads_the_most_recent_run(tmp_path):
     r = parse_last_run(_write_log(tmp_path, older + _LOG_FINISHED))
     assert r["log_time_start"] == "10:22:15"
     assert all("Vieille" not in s["name"] for s in r["steps"])
+
+
+# --- /api/causal-reasoning ----------------------------------------------------
+#
+# GET routes hit the REAL database (read-only, same discipline as the rest
+# of this file). POST /run is ALWAYS tested against a monkeypatched
+# run_causal_reasoning -- api/routers/causal_reasoning.py imports it as a
+# bare name specifically so tests can replace it here, exactly like
+# api/routers/pipeline.py's _spawn seam. The real function is never
+# guarded by PYTEST_CURRENT_TEST (unlike add_argued_texts), so calling it
+# unmocked from a test would reach real Groq -- never done here.
+
+def test_causal_reasoning_returns_expected_top_level_shape():
+    resp = client.get("/api/causal-reasoning")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"chains", "n_total", "staleness"}
+    assert isinstance(body["chains"], list)
+    assert body["n_total"] == len(body["chains"])
+
+
+def test_causal_reasoning_chain_shape():
+    resp = client.get("/api/causal-reasoning")
+    chains = resp.json()["chains"]
+    if not chains:
+        return  # nothing generated yet in this environment -- not a failure
+    chain = chains[0]
+    expected_keys = {
+        "id", "news_id", "news_title", "ticker_source", "chaine_raisonnement",
+        "entreprises_impactees", "confiance", "model", "created_at",
+    }
+    assert set(chain.keys()) == expected_keys
+    assert isinstance(chain["entreprises_impactees"], list)
+    for entry in chain["entreprises_impactees"]:
+        assert "entreprise" in entry
+        assert "effet" in entry
+
+
+def test_causal_reasoning_sorted_by_date_descending():
+    resp = client.get("/api/causal-reasoning", params={"limit": 500})
+    dates = [c["created_at"] for c in resp.json()["chains"]]
+    assert dates == sorted(dates, reverse=True)
+
+
+def test_causal_reasoning_limit_is_respected():
+    resp = client.get("/api/causal-reasoning", params={"limit": 2})
+    assert len(resp.json()["chains"]) <= 2
+
+
+def test_causal_reasoning_status_returns_expected_shape():
+    resp = client.get("/api/causal-reasoning/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"n_pending", "quota_used", "quota_limit", "quota_remaining"}
+    assert body["quota_limit"] == 5
+    assert body["quota_used"] + body["quota_remaining"] == body["quota_limit"]
+    assert body["n_pending"] >= 0
+
+
+def test_causal_reasoning_run_never_calls_real_groq(monkeypatch):
+    """The route must delegate to run_causal_reasoning exactly once and
+    return its stats untouched -- proves the route itself does no Groq
+    call, prompting, or reshaping of its own."""
+    import api.routers.causal_reasoning as cr_router
+
+    calls = []
+
+    def _fake_run(conn):
+        calls.append(conn)
+        return {
+            "n_candidates": 10, "processed": 3, "failed": 1,
+            "skipped_no_relations": 2, "quota_used": 3, "quota_limit": 5,
+            "quota_exhausted": False, "error": None,
+        }
+
+    monkeypatch.setattr(cr_router, "run_causal_reasoning", _fake_run)
+    resp = client.post("/api/causal-reasoning/run")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "n_candidates": 10, "processed": 3, "failed": 1,
+        "skipped_no_relations": 2, "quota_used": 3, "quota_limit": 5,
+        "quota_exhausted": False, "error": None,
+    }
+    assert len(calls) == 1
+
+
+def test_causal_reasoning_run_reports_quota_exhausted_without_error(monkeypatch):
+    import api.routers.causal_reasoning as cr_router
+
+    monkeypatch.setattr(cr_router, "run_causal_reasoning", lambda conn: {
+        "n_candidates": 50, "processed": 0, "failed": 0,
+        "skipped_no_relations": 0, "quota_used": 5, "quota_limit": 5,
+        "quota_exhausted": True, "error": None,
+    })
+    resp = client.post("/api/causal-reasoning/run")
+    assert resp.status_code == 200  # never a 5xx for a normal degraded state
+    body = resp.json()
+    assert body["quota_exhausted"] is True
+    assert body["error"] is None
+
+
+def test_causal_reasoning_run_surfaces_setup_error_without_5xx(monkeypatch):
+    """A genuine setup failure (missing GROQ_API_KEY, client unavailable)
+    is still a 200 with stats["error"] set -- run_causal_reasoning's own
+    'never raises' contract, mirrored by the route."""
+    import api.routers.causal_reasoning as cr_router
+
+    monkeypatch.setattr(cr_router, "run_causal_reasoning", lambda conn: {
+        "n_candidates": 0, "processed": 0, "failed": 0,
+        "skipped_no_relations": 0, "quota_used": 0, "quota_limit": 5,
+        "quota_exhausted": False, "error": "GROQ_API_KEY absent. Ajoutez-la a votre .env.",
+    })
+    resp = client.post("/api/causal-reasoning/run")
+    assert resp.status_code == 200
+    assert resp.json()["error"] == "GROQ_API_KEY absent. Ajoutez-la a votre .env."
