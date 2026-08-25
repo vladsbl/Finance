@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react'
-import { ApiError, fetchCorrelations } from '../api'
-import type { Correlation, CorrelationBadge, CorrelationsResponse } from '../types'
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
+import { ApiError, fetchCorrelations, fetchStockChart, fetchStockDetail } from '../api'
+import { ExpandModal } from '../components/ExpandModal'
+import type { Correlation, CorrelationBadge, CorrelationsResponse, StockDetail } from '../types'
 
 type CorrState =
   | { status: 'loading' }
@@ -65,6 +76,9 @@ export function CorrelationsPage() {
   // changing the page or the search.
   const [reloadKey, setReloadKey] = useState(0)
   const [state, setState] = useState<CorrState>({ status: 'loading' })
+  // The row currently shown in the expanded comparison view, or null when
+  // the modal is closed.
+  const [expanded, setExpanded] = useState<Correlation | null>(null)
 
   // Debounce. The pagination reset lives HERE rather than in the input's
   // onChange so it is tied to the search actually being applied; React
@@ -232,7 +246,12 @@ export function CorrelationsPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {state.data.correlations.map((c) => (
-                    <tr key={c.id} className="align-top hover:bg-gray-50">
+                    <tr
+                      key={c.id}
+                      onClick={() => setExpanded(c)}
+                      className="cursor-pointer align-top hover:bg-gray-50"
+                      title="Cliquer pour agrandir la comparaison"
+                    >
                       <td className="py-2 pr-4">
                         <div className="font-medium text-gray-900">
                           {c.ticker_source} &harr; {c.ticker_target}
@@ -283,6 +302,269 @@ export function CorrelationsPage() {
           )}
         </>
       )}
+
+      <ExpandModal
+        isOpen={expanded !== null}
+        onClose={() => setExpanded(null)}
+        title={expanded ? `${expanded.ticker_source} ↔ ${expanded.ticker_target}` : ''}
+      >
+        {expanded && <CorrelationComparison correlation={expanded} />}
+      </ExpandModal>
+    </div>
+  )
+}
+
+// --- Expanded comparison view ------------------------------------------------
+
+type DetailState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; data: StockDetail }
+
+interface ChartPoint {
+  date: string
+  source: number | null
+  target: number | null
+}
+
+type ChartState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'unavailable' } // not enough overlapping history to compare
+  | { status: 'ready'; points: ChartPoint[] }
+
+function loadDetail(ticker: string, setState: (s: DetailState) => void) {
+  setState({ status: 'loading' })
+  fetchStockDetail(ticker)
+    .then((data) => setState({ status: 'ready', data }))
+    .catch((err) => {
+      const message =
+        err instanceof ApiError ? err.message : `Erreur lors du chargement de ${ticker}.`
+      setState({ status: 'error', message })
+    })
+}
+
+// Minimum overlapping trading days below which a comparative chart is more
+// misleading than useful (a two- or three-point line isn't a real
+// visual comparison).
+const MIN_CHART_POINTS = 5
+
+async function loadComparisonChart(
+  sourceTicker: string,
+  targetTicker: string,
+  setState: (s: ChartState) => void,
+) {
+  setState({ status: 'loading' })
+  try {
+    const [sourceChart, targetChart] = await Promise.all([
+      fetchStockChart(sourceTicker),
+      fetchStockChart(targetTicker),
+    ])
+    const sourceByDate = new Map(sourceChart.points.map((p) => [p.date, p.close]))
+    const targetByDate = new Map(targetChart.points.map((p) => [p.date, p.close]))
+    const commonDates = [...sourceByDate.keys()]
+      .filter((d) => targetByDate.has(d) && sourceByDate.get(d) !== null && targetByDate.get(d) !== null)
+      .sort()
+
+    if (commonDates.length < MIN_CHART_POINTS) {
+      setState({ status: 'unavailable' })
+      return
+    }
+
+    // Normalised to "% change since the first common date" -- the two
+    // tickers can trade at wildly different price levels (and currencies),
+    // so overlaying raw closes would just show two flat-looking lines at
+    // different scales. A %-change baseline is the standard way to make
+    // co-movement visually comparable regardless of price level.
+    const firstSource = sourceByDate.get(commonDates[0])!
+    const firstTarget = targetByDate.get(commonDates[0])!
+    const points: ChartPoint[] = commonDates.map((date) => ({
+      date,
+      source: ((sourceByDate.get(date)! - firstSource) / firstSource) * 100,
+      target: ((targetByDate.get(date)! - firstTarget) / firstTarget) * 100,
+    }))
+    setState({ status: 'ready', points })
+  } catch (err) {
+    const message =
+      err instanceof ApiError ? err.message : 'Erreur lors du chargement du graphique comparatif.'
+    setState({ status: 'error', message })
+  }
+}
+
+function formatVariation(pct: number | null): string {
+  if (pct === null) return 'n/a'
+  const sign = pct >= 0 ? '+' : ''
+  return `${sign}${pct.toFixed(1)}%`
+}
+
+function CorrelationComparison({ correlation }: { correlation: Correlation }) {
+  const [sourceState, setSourceState] = useState<DetailState>({ status: 'loading' })
+  const [targetState, setTargetState] = useState<DetailState>({ status: 'loading' })
+  const [chartState, setChartState] = useState<ChartState>({ status: 'loading' })
+
+  useEffect(() => {
+    loadDetail(correlation.ticker_source, setSourceState)
+    loadDetail(correlation.ticker_target, setTargetState)
+    loadComparisonChart(correlation.ticker_source, correlation.ticker_target, setChartState)
+  }, [correlation.ticker_source, correlation.ticker_target])
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Correlation metrics, in large -- the reason these two tickers are
+          being compared in the first place. */}
+      <div className="grid grid-cols-2 gap-4 rounded-md bg-gray-50 p-4 sm:grid-cols-4">
+        <Metric label="Coefficient (Spearman)" value={formatCoefficient(correlation.coefficient)} />
+        <Metric label="P-value corrigee" value={formatPValue(correlation.p_value_corrigee)} />
+        <Metric label="Lag" value={correlation.lag_label} small />
+        <Metric label="Observations" value={String(correlation.n_observations)} />
+      </div>
+      {correlation.badge && (
+        <p
+          className={`-mt-3 rounded-md px-3 py-2 text-sm ${
+            correlation.badge.severity === 'warning'
+              ? 'bg-amber-50 text-amber-800'
+              : 'bg-blue-50 text-blue-700'
+          }`}
+        >
+          {correlation.badge.severity === 'warning' ? '⚠' : 'ℹ'} {correlation.badge.message}
+        </p>
+      )}
+
+      {/* Side-by-side company comparison. */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <CompanyPanel ticker={correlation.ticker_source} nom={correlation.nom_source} state={sourceState} />
+        <CompanyPanel ticker={correlation.ticker_target} nom={correlation.nom_target} state={targetState} />
+      </div>
+
+      {/* Comparative price chart. */}
+      <div>
+        <h3 className="mb-2 text-sm font-semibold text-gray-900">
+          Evolution comparee du prix (% depuis le premier jour commun)
+        </h3>
+        {chartState.status === 'loading' && (
+          <p className="text-sm text-gray-500">Chargement du graphique...</p>
+        )}
+        {chartState.status === 'error' && (
+          <p className="text-sm text-red-600">{chartState.message}</p>
+        )}
+        {chartState.status === 'unavailable' && (
+          <p className="text-sm text-gray-500">
+            Historique de prix insuffisant en commun entre {correlation.ticker_source} et{' '}
+            {correlation.ticker_target} pour un graphique comparatif.
+          </p>
+        )}
+        {chartState.status === 'ready' && (
+          <div className="h-64 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartState.points} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={40} />
+                <YAxis
+                  tick={{ fontSize: 11 }}
+                  width={50}
+                  tickFormatter={(v: number) => `${v.toFixed(0)}%`}
+                />
+                <Tooltip formatter={(v: number) => `${v.toFixed(1)}%`} />
+                <Legend />
+                <Line
+                  type="monotone"
+                  dataKey="source"
+                  name={correlation.ticker_source}
+                  stroke="#4f46e5"
+                  dot={false}
+                  strokeWidth={1.8}
+                  connectNulls
+                />
+                <Line
+                  type="monotone"
+                  dataKey="target"
+                  name={correlation.ticker_target}
+                  stroke="#f59e0b"
+                  dot={false}
+                  strokeWidth={1.8}
+                  connectNulls
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function Metric({ label, value, small }: { label: string; value: string; small?: boolean }) {
+  return (
+    <div>
+      <span className="text-xs text-gray-500">{label}</span>
+      <p className={small ? 'text-sm font-semibold text-gray-900' : 'text-xl font-semibold text-gray-900'}>
+        {value}
+      </p>
+    </div>
+  )
+}
+
+function CompanyPanel({
+  ticker,
+  nom,
+  state,
+}: {
+  ticker: string
+  nom: string
+  state: DetailState
+}) {
+  return (
+    <div className="rounded-md border border-gray-200 p-4">
+      <h3 className="text-base font-semibold text-gray-900">
+        {ticker} <span className="font-normal text-gray-500">-- {nom}</span>
+      </h3>
+
+      {state.status === 'loading' && <p className="mt-2 text-sm text-gray-500">Chargement...</p>}
+      {state.status === 'error' && <p className="mt-2 text-sm text-red-600">{state.message}</p>}
+
+      {state.status === 'ready' && (
+        <div className="mt-2 flex flex-col gap-2 text-sm">
+          {(state.data.sector || state.data.industry) && (
+            <p className="text-xs text-gray-500">
+              {[state.data.sector, state.data.industry].filter(Boolean).join(' - ')}
+            </p>
+          )}
+
+          <div>
+            <span className="text-xs text-gray-500">Prix actuel</span>
+            <p className="font-semibold text-gray-900">
+              {state.data.prix_eur !== null
+                ? `${state.data.prix_eur.toFixed(2)} EUR`
+                : state.data.current_price !== null
+                  ? `${state.data.current_price.toFixed(2)} ${state.data.devise}`
+                  : 'n/a'}
+            </p>
+            {state.data.variations && (
+              <p className="text-xs text-gray-500">
+                1j: {formatVariation(state.data.variations['1j'])} - 7j:{' '}
+                {formatVariation(state.data.variations['7j'])} - 30j:{' '}
+                {formatVariation(state.data.variations['30j'])}
+              </p>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <ScoreCell label="Prix/Valorisation" value={state.data.price_valuation_score} />
+            <ScoreCell label="Technique" value={state.data.technical_score} />
+            <ScoreCell label="Fondamental reel" value={state.data.score_fondamental_reel} />
+            <ScoreCell label="Confiance" value={state.data.confidence} suffix="%" />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ScoreCell({ label, value, suffix }: { label: string; value: number | null; suffix?: string }) {
+  return (
+    <div>
+      <span className="text-xs text-gray-500">{label}</span>
+      <p className="font-medium text-gray-900">{value === null ? 'n/a' : `${value.toFixed(0)}${suffix ?? ''}`}</p>
     </div>
   )
 }

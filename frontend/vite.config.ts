@@ -22,4 +22,12 @@ export default defineConfig({
       },
     },
   },
+  // Vitest reads this same config (shares the React/Tailwind plugin setup
+  // above) -- no separate vitest.config.ts needed. jsdom gives components
+  // a real DOM to render into; setupFiles wires up jest-dom's matchers
+  // (toBeInTheDocument, etc.).
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test-setup.ts'],
+  },
 })
