@@ -4,6 +4,7 @@ import type {
   CausalChainsResponse,
   CausalReasoningRunStats,
   CausalReasoningStatus,
+  NewsResponse,
   CorrelationsResponse,
   DailySummaryResponse,
   GraphResponse,
@@ -181,4 +182,12 @@ export function fetchCausalReasoningStatus(): Promise<CausalReasoningStatus> {
 // polling needed.
 export function runCausalReasoning(): Promise<CausalReasoningRunStats> {
   return postJson<CausalReasoningRunStats>('/causal-reasoning/run', {})
+}
+
+// --- /api/news ------------------------------------------------------------------
+
+export function fetchNews(limit = 50, offset = 0, ticker?: string): Promise<NewsResponse> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (ticker && ticker.trim()) params.set('ticker', ticker.trim())
+  return getJson<NewsResponse>(`/news?${params.toString()}`)
 }

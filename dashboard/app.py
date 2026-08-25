@@ -550,28 +550,34 @@ def render_stats(df):
 
 # --- News & AI analysis ----------------------------------------------------
 
-NEWS_SQL = """
-SELECT n.ticker, n.title, n.url, n.published_at, n.source,
-       a.company, a.sector, a.importance, a.tonalite, a.impact,
-       a.horizon, a.confidence
-FROM news_analysis a
-JOIN news_raw n ON n.id = a.news_id
-ORDER BY n.ticker, a.importance DESC, n.published_at DESC;
-"""
+from reasoning.analyze_news import (  # noqa: E402
+    load_news as _load_news_rows,
+    news_summary_paragraph as _news_summary_paragraph_dict,
+    price_before_after_news as _price_before_after_news,
+)
 
 
 @st.cache_data(show_spinner=False)
 def load_news():
-    """Return (news_df, error). Empty df (no error) when nothing analysed yet."""
+    """Return (news_df, error) -- thin cached wrapper around
+    reasoning.analyze_news.load_news, same pattern as load_correlations/
+    load_causal_chains's own dashboard wrappers. Converted back to a
+    DataFrame (sorted the way this page has always shown it: grouped by
+    ticker, most important/recent first within each) so the existing
+    pandas-based render loop below is untouched."""
     if not os.path.exists(DB_PATH):
         return pd.DataFrame(), None
     try:
         conn = sqlite3.connect(DB_PATH)
-        news = pd.read_sql_query(NEWS_SQL, conn)
+        rows = _load_news_rows(conn)
         conn.close()
-    except (sqlite3.Error, pd.errors.DatabaseError):
-        # news_raw / news_analysis not created yet.
-        return pd.DataFrame(), None
+    except sqlite3.Error as exc:
+        return pd.DataFrame(), str(exc)
+    news = pd.DataFrame(rows)
+    if not news.empty:
+        news = news.sort_values(
+            ["ticker", "importance", "published_at"], ascending=[True, False, False]
+        ).reset_index(drop=True)
     return news, None
 
 
@@ -582,46 +588,6 @@ def tonalite_color(tonalite):
     if t.startswith("neg"):
         return COLOR_BAD
     return "#6b7280"  # neutre
-
-
-def _price_before_after_news(conn, ticker, published_at):
-    """Price just before a news's publication (last close ON OR BEFORE that
-    date) and the most recent close available now (i.e. "after", however
-    much time has actually passed since) -- with the % variation between
-    them. Returns None if there's no close AT OR BEFORE the news date at
-    all (news older than price_history's coverage), or a dict with
-    variation_pct=None if there's simply no close strictly AFTER the "before"
-    one yet (news too recent for anything to have changed since) -- the
-    caller must show "donnee insuffisante" for that case, never compute a
-    variation against the exact same price twice."""
-    if not published_at:
-        return None
-    news_date = str(published_at)[:10]
-
-    before_row = conn.execute(
-        "SELECT date, close FROM price_history WHERE ticker = ? AND close IS NOT NULL "
-        "AND date <= ? ORDER BY date DESC LIMIT 1",
-        (ticker, news_date),
-    ).fetchone()
-    if not before_row:
-        return None
-    date_before, price_before = before_row
-
-    after_row = conn.execute(
-        "SELECT date, close FROM price_history WHERE ticker = ? AND close IS NOT NULL "
-        "ORDER BY date DESC LIMIT 1",
-        (ticker,),
-    ).fetchone()
-    date_after, price_after = after_row if after_row else (None, None)
-
-    if not date_after or date_after <= date_before or not price_before:
-        return {"date_before": date_before, "price_before": price_before,
-                "date_after": None, "price_after": None, "variation_pct": None}
-
-    variation_pct = (price_after - price_before) / price_before * 100.0
-    return {"date_before": date_before, "price_before": price_before,
-            "date_after": date_after, "price_after": price_after,
-            "variation_pct": variation_pct}
 
 
 def _format_price_before_after(conn, ticker, price_info):
@@ -648,36 +614,17 @@ def _format_price_before_after(conn, ticker, price_info):
 
 
 def _news_summary_paragraph(row):
-    """A short multi-sentence paragraph assembled from ALREADY-STORED
-    news_analysis fields (importance, tonalite, impact, horizon) -- no new
-    LLM call, purely a clearer write-up of the exact same analysis instead
-    of a single terse sentence."""
-    company = row["company"] or row["ticker"]
-    sector = row["sector"]
-    importance = int(row["importance"]) if pd.notna(row["importance"]) else None
-    tonalite = str(row["tonalite"] or "neutre").lower()
-    impact = row["impact"]
-    horizon = row["horizon"]
-
-    sentences = []
-    if importance is not None and importance >= 8:
-        sentences.append(
-            f"Cette news est jugee tres importante ({importance}/10) pour {company}"
-            + (f", dans le secteur {sector}" if sector else "") + "."
-        )
-    elif importance is not None:
-        sentences.append(
-            f"Importance evaluee a {importance}/10 pour {company}"
-            + (f" ({sector})" if sector else "") + "."
-        )
-    tonalite_txt = {"positive": "plutot positive", "negative": "plutot negative"}.get(
-        tonalite, "neutre")
-    sentences.append(f"La tonalite generale de cette news est {tonalite_txt}.")
-    if impact:
-        sentences.append(f"Impact identifie par l'analyse : {impact}.")
-    if horizon:
-        sentences.append(f"Horizon concerne : {horizon}.")
-    return " ".join(sentences)
+    """Thin adapter around reasoning.analyze_news.news_summary_paragraph:
+    that function takes a plain dict with importance already an int-or-None
+    (matching its own load_news()'s shape), but this page's `row` is a
+    pandas Series from load_news()'s DataFrame, where a missing importance
+    is NaN, not None -- pd.notna() belongs at exactly this pandas/dict
+    boundary, not duplicated inside the shared function."""
+    return _news_summary_paragraph_dict({
+        "ticker": row["ticker"], "company": row["company"], "sector": row["sector"],
+        "importance": int(row["importance"]) if pd.notna(row["importance"]) else None,
+        "tonalite": row["tonalite"], "impact": row["impact"], "horizon": row["horizon"],
+    })
 
 
 def render_news_page():

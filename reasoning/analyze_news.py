@@ -316,6 +316,132 @@ def analyse_with_retry(client, ticker, title, summary):
     return None
 
 
+# --- Read helpers (dashboard "News & Analyse IA" page + API) -----------------
+#
+# Relocated from dashboard/app.py: NEWS_SQL/load_news and
+# _price_before_after_news were already conn-first/pure (no Streamlit,
+# no pandas dependency in the latter) -- straight moves. _news_summary_
+# paragraph is adapted here to take a plain dict (this module's own
+# load_news() return shape) instead of a pandas Series, since neither the
+# API nor this module use pandas -- dashboard/app.py's own thin wrapper
+# converts back to a DataFrame for its existing pandas-based iteration.
+
+NEWS_SQL = """
+SELECT n.ticker, n.title, n.url, n.published_at, n.source,
+       a.company, a.sector, a.importance, a.tonalite, a.impact,
+       a.horizon, a.confidence
+FROM news_analysis a
+JOIN news_raw n ON n.id = a.news_id
+ORDER BY n.published_at DESC;
+"""
+
+NEWS_BY_TICKER_SQL = """
+SELECT n.ticker, n.title, n.url, n.published_at, n.source,
+       a.company, a.sector, a.importance, a.tonalite, a.impact,
+       a.horizon, a.confidence
+FROM news_analysis a
+JOIN news_raw n ON n.id = a.news_id
+WHERE n.ticker = ?
+ORDER BY n.published_at DESC;
+"""
+
+
+def load_news(conn, ticker=None):
+    """Every analysed news item (news_raw JOIN news_analysis), most recent
+    first -- optionally scoped to one ticker. Plain dicts, shared by the
+    API and (via dashboard/app.py's own thin wrapper) the Streamlit page.
+
+    Sort differs deliberately from the dashboard's historical ordering
+    (ticker, importance DESC, published_at DESC): that page always scopes
+    to one ticker first via a selectbox, so grouping by ticker was moot
+    there. The API additionally serves an unscoped "all recent news"
+    default view, so global recency is the natural primary sort here."""
+    conn.row_factory = sqlite3.Row
+    if ticker:
+        rows = conn.execute(NEWS_BY_TICKER_SQL, (ticker,)).fetchall()
+    else:
+        rows = conn.execute(NEWS_SQL).fetchall()
+    return [dict(r) for r in rows]
+
+
+def price_before_after_news(conn, ticker, published_at):
+    """Price just before a news's publication (last close ON OR BEFORE that
+    date) and the most recent close available now (i.e. "after", however
+    much time has actually passed since) -- with the % variation between
+    them. Returns None if there's no close AT OR BEFORE the news date at
+    all (news older than price_history's coverage), or a dict with
+    variation_pct=None if there's simply no close strictly AFTER the
+    "before" one yet (news too recent for anything to have changed since)
+    -- the caller must show "donnee insuffisante" for that case, never
+    compute a variation against the exact same price twice. Native
+    currency only (no EUR conversion here -- see dashboard/currency.py /
+    api/routers/stock.py's own precedent: that's a display-layer concern
+    for the caller)."""
+    if not published_at:
+        return None
+    news_date = str(published_at)[:10]
+
+    before_row = conn.execute(
+        "SELECT date, close FROM price_history WHERE ticker = ? AND close IS NOT NULL "
+        "AND date <= ? ORDER BY date DESC LIMIT 1",
+        (ticker, news_date),
+    ).fetchone()
+    if not before_row:
+        return None
+    date_before, price_before = before_row
+
+    after_row = conn.execute(
+        "SELECT date, close FROM price_history WHERE ticker = ? AND close IS NOT NULL "
+        "ORDER BY date DESC LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    date_after, price_after = after_row if after_row else (None, None)
+
+    if not date_after or date_after <= date_before or not price_before:
+        return {"date_before": date_before, "price_before": price_before,
+                "date_after": None, "price_after": None, "variation_pct": None}
+
+    variation_pct = (price_after - price_before) / price_before * 100.0
+    return {"date_before": date_before, "price_before": price_before,
+            "date_after": date_after, "price_after": price_after,
+            "variation_pct": variation_pct}
+
+
+def news_summary_paragraph(row):
+    """A short multi-sentence paragraph assembled from ALREADY-STORED
+    news_analysis fields (importance, tonalite, impact, horizon) -- no new
+    LLM call, purely a clearer write-up of the exact same analysis instead
+    of a single terse sentence. `row` is a plain dict (or sqlite3.Row) with
+    importance already an int or None -- unlike dashboard/app.py's original
+    pandas-Series version, no pd.notna() needed."""
+    company = row["company"] or row["ticker"]
+    sector = row["sector"]
+    importance = row["importance"]
+    tonalite = str(row["tonalite"] or "neutre").lower()
+    impact = row["impact"]
+    horizon = row["horizon"]
+
+    sentences = []
+    if importance is not None and importance >= 8:
+        sentences.append(
+            f"Cette news est jugee tres importante ({importance}/10) pour {company}"
+            + (f", dans le secteur {sector}" if sector else "") + "."
+        )
+    elif importance is not None:
+        sentences.append(
+            f"Importance evaluee a {importance}/10 pour {company}"
+            + (f" ({sector})" if sector else "") + "."
+        )
+    tonalite_txt = {"positive": "plutot positive", "negative": "plutot negative"}.get(
+        tonalite, "neutre")
+    sentences.append(f"La tonalite generale de cette news est {tonalite_txt}.")
+    if impact:
+        sentences.append(f"Impact identifie par l'analyse : {impact}.")
+    if horizon:
+        sentences.append(f"Horizon concerne : {horizon}.")
+    return " ".join(sentences)
+
+
 # --- Orchestration ---------------------------------------------------------
 
 def parse_args(argv):

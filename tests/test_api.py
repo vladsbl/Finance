@@ -1055,3 +1055,127 @@ def test_causal_reasoning_run_surfaces_setup_error_without_5xx(monkeypatch):
     resp = client.post("/api/causal-reasoning/run")
     assert resp.status_code == 200
     assert resp.json()["error"] == "GROQ_API_KEY absent. Ajoutez-la a votre .env."
+
+
+# --- /api/news ----------------------------------------------------------------
+#
+# Real DB reads only (same discipline as the rest of this file) -- no Groq
+# call anywhere on this route's path (news_analysis is already populated by
+# an earlier reasoning/analyze_news.py run, this route only reads it).
+# AAPL is used as the reference ticker: confirmed via manual curl testing to
+# have real news_analysis rows with a full price-before/after (real
+# variation, not "insufficient data").
+
+def test_news_returns_expected_top_level_shape():
+    resp = client.get("/api/news")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"news", "n_total", "ticker", "limit", "offset"}
+    assert isinstance(body["news"], list)
+    assert body["ticker"] is None
+    assert body["n_total"] >= len(body["news"])
+
+
+def test_news_item_shape():
+    resp = client.get("/api/news", params={"limit": 1})
+    items = resp.json()["news"]
+    if not items:
+        return  # nothing analysed yet in this environment -- not a failure
+    item = items[0]
+    expected_keys = {
+        "ticker", "title", "url", "published_at", "source", "company",
+        "sector", "importance", "tonalite", "impact", "horizon", "confidence",
+        "summary_paragraph", "price_context",
+    }
+    assert set(item.keys()) == expected_keys
+    assert isinstance(item["summary_paragraph"], str) and item["summary_paragraph"]
+    price_ctx_keys = {
+        "devise", "date_before", "price_before", "price_before_eur",
+        "date_after", "price_after", "price_after_eur", "variation_pct",
+        "insufficient_data", "insufficient_reason",
+    }
+    assert set(item["price_context"].keys()) == price_ctx_keys
+
+
+def test_news_sorted_by_published_at_descending():
+    resp = client.get("/api/news", params={"limit": 500})
+    dates = [n["published_at"] for n in resp.json()["news"]]
+    assert dates == sorted(dates, reverse=True)
+
+
+def test_news_ticker_filter_scopes_results():
+    resp = client.get("/api/news", params={"ticker": "AAPL"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ticker"] == "AAPL"
+    assert all(n["ticker"] == "AAPL" for n in body["news"])
+
+
+def test_news_ticker_filter_is_case_insensitive_and_trimmed():
+    resp = client.get("/api/news", params={"ticker": "  aapl  "})
+    assert resp.json()["ticker"] == "AAPL"
+
+
+def test_news_price_context_has_real_variation_for_known_ticker():
+    """AAPL has price_history both before and well after its stored news --
+    confirmed via manual curl testing -- so insufficient_data must be False
+    with a real numeric variation, not a null/placeholder."""
+    resp = client.get("/api/news", params={"ticker": "AAPL", "limit": 1})
+    items = resp.json()["news"]
+    if not items:
+        return
+    ctx = items[0]["price_context"]
+    assert ctx["insufficient_data"] is False
+    assert ctx["variation_pct"] is not None
+    assert ctx["price_before"] is not None and ctx["price_after"] is not None
+    assert ctx["price_before_eur"] is not None  # AAPL trades in USD, EUR rate always resolvable
+
+
+def test_news_unknown_ticker_returns_empty_not_error():
+    resp = client.get("/api/news", params={"ticker": "NOTATICKER123"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["news"] == []
+    assert body["n_total"] == 0
+    assert body["ticker"] == "NOTATICKER123"
+
+
+def test_news_default_limit_is_50():
+    resp = client.get("/api/news")
+    body = resp.json()
+    assert body["limit"] == 50
+    assert body["offset"] == 0
+    assert len(body["news"]) <= 50
+
+
+def test_news_custom_limit_is_respected():
+    resp = client.get("/api/news", params={"limit": 5})
+    body = resp.json()
+    assert body["limit"] == 5
+    assert len(body["news"]) <= 5
+
+
+def test_news_offset_returns_a_different_page():
+    page1 = client.get("/api/news", params={"limit": 10, "offset": 0}).json()
+    page2 = client.get("/api/news", params={"limit": 10, "offset": 10}).json()
+    assert page1["n_total"] == page2["n_total"]
+    urls1 = {n["url"] for n in page1["news"]}
+    urls2 = {n["url"] for n in page2["news"]}
+    if urls1 and urls2:
+        assert urls1.isdisjoint(urls2)
+
+
+def test_news_n_total_reflects_full_count_not_just_page():
+    small = client.get("/api/news", params={"limit": 1}).json()
+    full = client.get("/api/news", params={"limit": 500}).json()
+    assert small["n_total"] == full["n_total"]
+
+
+def test_news_limit_beyond_max_returns_422():
+    resp = client.get("/api/news", params={"limit": 10000})
+    assert resp.status_code == 422
+
+
+def test_news_negative_offset_returns_422():
+    resp = client.get("/api/news", params={"offset": -1})
+    assert resp.status_code == 422

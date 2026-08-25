@@ -4,6 +4,7 @@ import { CausalReasoningPage } from './pages/CausalReasoningPage'
 import { CorrelationsPage } from './pages/CorrelationsPage'
 import { DailySummaryPage } from './pages/DailySummaryPage'
 import { GraphPage } from './pages/GraphPage'
+import { NewsPage } from './pages/NewsPage'
 import { OpportunitiesPage } from './pages/OpportunitiesPage'
 import { StockPage } from './pages/StockPage'
 
@@ -19,6 +20,7 @@ function App() {
           <Route path="/graph" element={<GraphPage />} />
           <Route path="/correlations" element={<CorrelationsPage />} />
           <Route path="/causal-reasoning" element={<CausalReasoningPage />} />
+          <Route path="/news" element={<NewsPage />} />
         </Routes>
       </div>
     </BrowserRouter>

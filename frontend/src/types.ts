@@ -309,3 +309,45 @@ export interface CausalReasoningRunStats {
   quota_exhausted: boolean
   error: string | null
 }
+
+// Mirrors api/routers/news.py exactly.
+
+export type Tonalite = 'positive' | 'negative' | 'neutre' | string
+
+export interface NewsPriceContext {
+  devise: string
+  date_before: string | null
+  price_before: number | null
+  price_before_eur: number | null
+  date_after: string | null
+  price_after: number | null
+  price_after_eur: number | null
+  variation_pct: number | null
+  insufficient_data: boolean
+  insufficient_reason: string | null
+}
+
+export interface NewsItem {
+  ticker: string
+  title: string
+  url: string | null
+  published_at: string
+  source: string | null
+  company: string | null
+  sector: string | null
+  importance: number | null
+  tonalite: Tonalite
+  impact: string | null
+  horizon: string | null
+  confidence: number | null
+  summary_paragraph: string
+  price_context: NewsPriceContext
+}
+
+export interface NewsResponse {
+  news: NewsItem[]
+  n_total: number
+  ticker: string | null
+  limit: number
+  offset: number
+}

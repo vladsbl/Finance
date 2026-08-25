@@ -8,6 +8,7 @@ const LINKS = [
   { to: '/graph', label: 'Knowledge Graph' },
   { to: '/correlations', label: 'Correlations decouvertes' },
   { to: '/causal-reasoning', label: 'Raisonnement causal' },
+  { to: '/news', label: 'News & Analyse IA' },
 ]
 
 export function NavBar() {
