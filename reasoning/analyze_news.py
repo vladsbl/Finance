@@ -247,15 +247,19 @@ def _is_rate_limit(exc):
 
 def _is_daily_token_limit(exc):
     """Groq's free ``on_demand`` tier enforces a Tokens-Per-Day (TPD) cap
-    (100k at time of writing) that, for this prompt's typical size, binds
-    much sooner than DAILY_CALL_LIMIT's request-count assumption -- observed
-    in practice around 270-290 analyses/day, not 1000. Distinguished from a
-    transient per-minute rate limit because Groq's own error message quotes a
-    multi-minute wait: retrying it with the usual few-second backoff cannot
-    possibly succeed, so this signal must stop the whole run immediately
-    instead of burning through the rest of the candidate list one exhausted
-    retry loop at a time (which, at thousands of remaining items, would take
-    hours for no benefit)."""
+    (200k as of the openai/gpt-oss-120b migration, confirmed via the
+    account's own 429 error message on 2026-08-25 -- was 100k under the
+    now-deprecated llama-3.3-70b-versatile) that, for this prompt's
+    typical size, binds much sooner than DAILY_CALL_LIMIT's request-count
+    assumption -- observed in practice around 500-550 analyses/day when
+    this module has the full daily budget to itself (~380 tokens/analysis,
+    per a real 334-analysis/~127k-token run), well short of 1000.
+    Distinguished from a transient per-minute rate limit because Groq's
+    own error message quotes a multi-minute wait: retrying it with the
+    usual few-second backoff cannot possibly succeed, so this signal must
+    stop the whole run immediately instead of burning through the rest of
+    the candidate list one exhausted retry loop at a time (which, at
+    thousands of remaining items, would take hours for no benefit)."""
     text = str(exc).lower()
     return "tokens per day" in text or "(tpd)" in text
 

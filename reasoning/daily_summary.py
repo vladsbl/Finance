@@ -634,8 +634,11 @@ from reasoning.groq_config import (  # noqa: E402
 # Two SEPARATE daily quota pools, each its own table, so browsing dozens of
 # tickers/day on "Analyse d'une action" (dashboard/app.py) can never block --
 # or be blocked by -- Resume du jour's own 3 signals. Both stay comfortably
-# within Groq's real ceiling (~270-290 analyses/day observed, tied to the
-# free tier's 100k-tokens/day limit, not a request-count limit): 3 + 10 = 13
+# within Groq's real ceiling (~500-550 analyses/day observed for
+# reasoning/analyze_news.py when it has the account's full daily token
+# budget to itself, tied to the free tier's 200k-tokens/day (TPD) limit
+# for openai/gpt-oss-120b -- was 100k under the now-deprecated
+# llama-3.3-70b-versatile -- not a request-count limit): 3 + 10 = 13
 # combined worst case, nowhere close.
 DAILY_LLM_CALL_LIMIT = 3            # Resume du jour (its TOP_N signals)
 TICKER_ANALYSIS_DAILY_LIMIT = 10    # "Analyse d'une action", any ticker on demand
