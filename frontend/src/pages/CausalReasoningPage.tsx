@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ApiError,
   fetchCausalChains,
@@ -7,6 +7,7 @@ import {
   runCausalReasoning,
 } from '../api'
 import { CompanyDescription } from '../components/CompanyDescription'
+import { DirectionFilter, dominantDirection } from '../components/DirectionFilter'
 import { DirectionProbabilityBar } from '../components/DirectionProbabilityBar'
 import { ExpandModal } from '../components/ExpandModal'
 import { PriceHeadline } from '../components/PriceHeadline'
@@ -15,6 +16,7 @@ import type {
   CausalChainsResponse,
   CausalReasoningRunStats,
   CausalReasoningStatus,
+  DirectionFilterValue,
   EffetImpact,
   StockDetail,
 } from '../types'
@@ -44,6 +46,18 @@ const EFFET_STYLES: Record<string, string> = {
   positif: 'bg-emerald-100 text-emerald-800',
   negatif: 'bg-red-100 text-red-800',
   neutre: 'bg-gray-100 text-gray-700',
+}
+
+const DIRECTION_LABELS: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
+  hausse: 'Hausse',
+  stagnation: 'Stagnation',
+  baisse: 'Baisse',
+}
+
+const DIRECTION_BADGE_STYLES: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
+  hausse: 'bg-emerald-100 text-emerald-800',
+  stagnation: 'bg-gray-100 text-gray-700',
+  baisse: 'bg-red-100 text-red-800',
 }
 
 function effetStyle(effet: string): string {
@@ -100,6 +114,7 @@ export function CausalReasoningPage() {
   const [chainsState, setChainsState] = useState<ChainsState>({ status: 'loading' })
   const [statusState, setStatusState] = useState<StatusState>({ status: 'loading' })
   const [runState, setRunState] = useState<RunState>({ status: 'idle' })
+  const [direction, setDirection] = useState<DirectionFilterValue>('toutes')
 
   const refresh = useCallback(() => {
     loadChains(setChainsState)
@@ -125,6 +140,19 @@ export function CausalReasoningPage() {
       setRunState({ status: 'error', message })
     }
   }
+
+  // Filtered entirely client-side -- this route has no pagination (a
+  // fixed, tiny LIMIT, whole list already loaded in one shot), so a
+  // backend `direction` query param would add nothing (see
+  // DirectionFilter.tsx's own docstring for why Opportunites/News instead
+  // filter server-side).
+  const filteredChains = useMemo(() => {
+    if (chainsState.status !== 'ready') return []
+    if (direction === 'toutes') return chainsState.data.chains
+    return chainsState.data.chains.filter(
+      (c) => c.direction_probabilities !== null && dominantDirection(c.direction_probabilities) === direction,
+    )
+  }, [chainsState, direction])
 
   const busy = runState.status === 'running'
   const statusReady = statusState.status === 'ready' ? statusState.data : null
@@ -190,6 +218,10 @@ export function CausalReasoningPage() {
         })()}
       </div>
 
+      <div className="mt-4">
+        <DirectionFilter value={direction} onChange={setDirection} />
+      </div>
+
       <div className="mt-6">
         {chainsState.status === 'loading' && (
           <div className="flex items-center gap-3 text-gray-600">
@@ -226,6 +258,10 @@ export function CausalReasoningPage() {
                 Aucune chaine de raisonnement causal generee pour l'instant. Utilisez le bouton
                 "Recalculer maintenant" ci-dessus (limite par un quota Groq quotidien dedie).
               </div>
+            ) : filteredChains.length === 0 ? (
+              <div className="rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+                Aucune chaine ne correspond a ce filtre de direction.
+              </div>
             ) : (
               <>
                 <p className="mb-3 text-sm text-gray-500">
@@ -233,7 +269,7 @@ export function CausalReasoningPage() {
                   triees par date decroissante.
                 </p>
                 <div className="flex flex-col gap-4">
-                  {chainsState.data.chains.map((chain) => (
+                  {filteredChains.map((chain) => (
                     <ChainCard key={chain.id} chain={chain} />
                   ))}
                 </div>
@@ -272,6 +308,13 @@ function ChainCard({ chain }: { chain: CausalChain }) {
           {chain.confiance !== null && (
             <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700">
               Confiance : {chain.confiance.toFixed(0)}%
+            </span>
+          )}
+          {chain.direction_probabilities && (
+            <span
+              className={`rounded-full px-2.5 py-1 text-xs font-medium ${DIRECTION_BADGE_STYLES[dominantDirection(chain.direction_probabilities)]}`}
+            >
+              {DIRECTION_LABELS[dominantDirection(chain.direction_probabilities)]}
             </span>
           )}
           <button

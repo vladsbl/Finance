@@ -9,6 +9,7 @@ import type {
   NewsResponse,
   CorrelationsResponse,
   DailySummaryResponse,
+  DirectionFilterValue,
   GraphResponse,
   ManualRelation,
   ManualRelationsResponse,
@@ -95,9 +96,11 @@ export function fetchOpportunites(
   priorite: Priorite = 'toutes',
   limit = 50,
   offset = 0,
+  direction: DirectionFilterValue = 'toutes',
 ): Promise<OpportunitesResponse> {
   const params = new URLSearchParams({
     priorite,
+    direction,
     limit: String(limit),
     offset: String(offset),
   })
@@ -195,8 +198,13 @@ export function runCausalReasoning(): Promise<CausalReasoningRunStats> {
 
 // --- /api/news ------------------------------------------------------------------
 
-export function fetchNews(limit = 50, offset = 0, ticker?: string): Promise<NewsResponse> {
-  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+export function fetchNews(
+  limit = 50,
+  offset = 0,
+  ticker?: string,
+  direction: DirectionFilterValue = 'toutes',
+): Promise<NewsResponse> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset), direction })
   if (ticker && ticker.trim()) params.set('ticker', ticker.trim())
   return getJson<NewsResponse>(`/news?${params.toString()}`)
 }

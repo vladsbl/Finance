@@ -16,7 +16,9 @@ from reasoning.direction_probability import (  # noqa: E402
     HORIZON_BASE,
     HORIZON_NEWS,
     compute_direction_probabilities,
+    dominant_direction,
     load_causal_effect_for_ticker,
+    load_causal_effects_bulk,
 )
 
 
@@ -191,3 +193,67 @@ def test_load_causal_effect_for_ticker_returns_none_when_absent():
         "confiance REAL, created_at TEXT)"
     )
     assert load_causal_effect_for_ticker(conn, "ZZZZ") is None
+
+
+def test_dominant_direction_picks_the_largest_bucket():
+    assert dominant_direction({"hausse": 70, "stagnation": 20, "baisse": 10}) == "hausse"
+    assert dominant_direction({"hausse": 10, "stagnation": 20, "baisse": 70}) == "baisse"
+    assert dominant_direction({"hausse": 20, "stagnation": 60, "baisse": 20}) == "stagnation"
+
+
+def test_dominant_direction_ties_break_toward_stagnation():
+    assert dominant_direction({"hausse": 40, "stagnation": 40, "baisse": 20}) == "stagnation"
+    assert dominant_direction({"hausse": 20, "stagnation": 40, "baisse": 40}) == "stagnation"
+
+
+def _make_causal_chains_conn():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE causal_chains (id INTEGER PRIMARY KEY, entreprises_impactees TEXT, "
+        "confiance REAL, created_at TEXT)"
+    )
+    return conn
+
+
+def test_load_causal_effects_bulk_builds_one_entry_per_ticker():
+    conn = _make_causal_chains_conn()
+    conn.execute(
+        "INSERT INTO causal_chains (entreprises_impactees, confiance, created_at) VALUES (?, ?, ?)",
+        (
+            '[{"entreprise": "Caterpillar Inc.", "ticker": "CAT", "effet": "positif"}, '
+            '{"entreprise": "Rio Tinto", "ticker": "RIO.L", "effet": "negatif"}]',
+            85.0, "2026-08-24 10:00:00",
+        ),
+    )
+    bulk = load_causal_effects_bulk(conn)
+    assert bulk["CAT"]["effet"] == "positif"
+    assert bulk["RIO.L"]["effet"] == "negatif"
+    assert len(bulk) == 2
+
+
+def test_load_causal_effects_bulk_keeps_most_recent_per_ticker():
+    conn = _make_causal_chains_conn()
+    # Newest first (matches the real ORDER BY created_at DESC query) --
+    # the OLDER entry for CAT must never overwrite the newer one.
+    conn.execute(
+        "INSERT INTO causal_chains (entreprises_impactees, confiance, created_at) VALUES (?, ?, ?)",
+        ('[{"entreprise": "Caterpillar Inc.", "ticker": "CAT", "effet": "positif"}]', 90.0, "2026-08-25 10:00:00"),
+    )
+    conn.execute(
+        "INSERT INTO causal_chains (entreprises_impactees, confiance, created_at) VALUES (?, ?, ?)",
+        ('[{"entreprise": "Caterpillar Inc.", "ticker": "CAT", "effet": "negatif"}]', 50.0, "2026-08-20 10:00:00"),
+    )
+    bulk = load_causal_effects_bulk(conn)
+    assert bulk["CAT"]["effet"] == "positif"
+    assert bulk["CAT"]["confiance"] == 90.0
+
+
+def test_load_causal_effects_bulk_matches_single_ticker_lookup():
+    conn = _make_causal_chains_conn()
+    conn.execute(
+        "INSERT INTO causal_chains (entreprises_impactees, confiance, created_at) VALUES (?, ?, ?)",
+        ('[{"entreprise": "Caterpillar Inc.", "ticker": "CAT", "effet": "positif"}]', 85.0, "2026-08-24 10:00:00"),
+    )
+    bulk = load_causal_effects_bulk(conn)
+    single = load_causal_effect_for_ticker(conn, "CAT")
+    assert bulk["CAT"] == single

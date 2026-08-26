@@ -83,6 +83,12 @@ export interface ArguedTextResponse {
 
 export type Priorite = 'toutes' | 'haute' | 'moyenne' | 'basse'
 
+// Mirrors the `direction` query param shared by /api/opportunities and
+// /api/news, and the dominant-scenario helper used client-side for
+// /api/daily-summary and /api/causal-reasoning (which have no such param --
+// see DirectionFilter.tsx's own docstring for why).
+export type DirectionFilterValue = 'toutes' | 'hausse' | 'stagnation' | 'baisse'
+
 export interface Opportunite {
   ticker: string
   nom_affiche: string
@@ -95,6 +101,7 @@ export interface Opportunite {
   confiance: number | null
   explication: string | null
   date_calcul: string
+  direction_probabilities: DirectionProbabilities | null
 }
 
 export interface OpportunitesResponse {
@@ -313,6 +320,7 @@ export interface CausalChain {
   confiance: number | null
   model: string | null
   created_at: string
+  direction_probabilities: DirectionProbabilities | null
 }
 
 export interface CausalChainsResponse {
@@ -374,6 +382,7 @@ export interface NewsItem {
   confidence: number | null
   summary_paragraph: string
   price_context: NewsPriceContext
+  direction_probabilities: DirectionProbabilities | null
 }
 
 export interface NewsResponse {

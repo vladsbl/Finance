@@ -549,6 +549,57 @@ def load_ticker_detail(conn, ticker):
     }
 
 
+def load_latest_scores_bulk(conn, tickers):
+    """{ticker: {"technical_score", "price_valuation_score",
+    "score_fondamental_reel"}} for every ticker in `tickers` -- TWO bulk
+    queries total (one per source table), never one query per ticker.
+
+    Built for list views that need these three pillars for many tickers at
+    once purely to feed reasoning/direction_probability.py's
+    compute_direction_probabilities() (News & Analyse IA, Raisonnement
+    causal) -- unlike load_ticker_detail() above, this is NOT a full
+    per-ticker detail (no price history, no RSI/MA, no legacy scores), just
+    the three fields that computation actually needs, so a page with
+    hundreds of distinct tickers doesn't pay for a full load_ticker_detail
+    per row. Opportunites du jour does NOT need this: its own `opportunites`
+    rows already carry these three columns denormalized at scoring time.
+
+    Missing tickers (never scored, or scored under a pillar that failed)
+    simply keep their scores at None -- same graceful-degradation
+    convention as load_ticker_detail, never raises."""
+    tickers = sorted({t for t in tickers if t})
+    result = {t: {"technical_score": None, "price_valuation_score": None,
+                  "score_fondamental_reel": None} for t in tickers}
+    if not tickers:
+        return result
+
+    placeholders = ",".join("?" for _ in tickers)
+    final_rows = conn.execute(
+        f"SELECT f.symbol, f.price_valuation_score, f.technical_score "
+        f"FROM final_scores f "
+        f"INNER JOIN (SELECT symbol, MAX(id) AS max_id FROM final_scores "
+        f"WHERE symbol IN ({placeholders}) GROUP BY symbol) latest "
+        f"ON latest.symbol = f.symbol AND latest.max_id = f.id",
+        tickers,
+    ).fetchall()
+    for symbol, price_valuation_score, technical_score in final_rows:
+        result[symbol]["price_valuation_score"] = price_valuation_score
+        result[symbol]["technical_score"] = technical_score
+
+    fund_rows = conn.execute(
+        f"SELECT f.symbol, f.score_global "
+        f"FROM fundamental_real_scores f "
+        f"INNER JOIN (SELECT symbol, MAX(id) AS max_id FROM fundamental_real_scores "
+        f"WHERE symbol IN ({placeholders}) GROUP BY symbol) latest "
+        f"ON latest.symbol = f.symbol AND latest.max_id = f.id",
+        tickers,
+    ).fetchall()
+    for symbol, score_global in fund_rows:
+        result[symbol]["score_fondamental_reel"] = score_global
+
+    return result
+
+
 def _rolling_average_series(values, window):
     """Full pandas Series(values).rolling(window).mean() equivalent as a
     plain list (None wherever pandas would show NaN): the first window-1

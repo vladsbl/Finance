@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import { ApiError, fetchNews, fetchNewsNarrative, fetchStockDetail, fetchTickers } from '../api'
 import { CompanyDescription } from '../components/CompanyDescription'
+import { DirectionFilter, dominantDirection } from '../components/DirectionFilter'
 import { DirectionProbabilityBar } from '../components/DirectionProbabilityBar'
 import { ExpandModal } from '../components/ExpandModal'
 import { MarkdownText } from '../components/MarkdownText'
 import { PriceHeadline } from '../components/PriceHeadline'
 import { TickerSearch } from '../components/TickerSearch'
 import type {
+  DirectionFilterValue,
   DirectionProbabilities,
   NewsItem,
   NewsNarrativeSource,
@@ -77,13 +79,26 @@ function formatPriceContext(ctx: NewsPriceContext): string {
   )
 }
 
+const DIRECTION_LABELS: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
+  hausse: 'Hausse',
+  stagnation: 'Stagnation',
+  baisse: 'Baisse',
+}
+
+const DIRECTION_BADGE_STYLES: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
+  hausse: 'bg-emerald-100 text-emerald-800',
+  stagnation: 'bg-gray-100 text-gray-700',
+  baisse: 'bg-red-100 text-red-800',
+}
+
 function loadNews(
   ticker: string | null,
   page: number,
+  direction: DirectionFilterValue,
   setState: (s: NewsState) => void,
 ) {
   setState({ status: 'loading' })
-  fetchNews(PAGE_SIZE, page * PAGE_SIZE, ticker ?? undefined)
+  fetchNews(PAGE_SIZE, page * PAGE_SIZE, ticker ?? undefined, direction)
     .then((data) => setState({ status: 'ready', data }))
     .catch((err) => {
       const message =
@@ -106,6 +121,7 @@ function loadTickers(setState: (s: TickersState) => void) {
 export function NewsPage() {
   const [tickersState, setTickersState] = useState<TickersState>({ status: 'loading' })
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null)
+  const [direction, setDirection] = useState<DirectionFilterValue>('toutes')
   const [page, setPage] = useState(0)
   const [newsState, setNewsState] = useState<NewsState>({ status: 'loading' })
 
@@ -113,9 +129,13 @@ export function NewsPage() {
     loadTickers(setTickersState)
   }, [])
 
+  // `direction` is applied server-side (see api.ts's fetchNews and
+  // api/routers/news.py's own `direction` param) -- this list genuinely
+  // paginates (hundreds of news across many pages), so a client-side
+  // filter would only narrow whatever page happens to be loaded.
   useEffect(() => {
-    loadNews(selectedTicker, page, setNewsState)
-  }, [selectedTicker, page])
+    loadNews(selectedTicker, page, direction, setNewsState)
+  }, [selectedTicker, direction, page])
 
   function handleSelectTicker(ticker: string) {
     setSelectedTicker(ticker)
@@ -124,6 +144,11 @@ export function NewsPage() {
 
   function handleClearTicker() {
     setSelectedTicker(null)
+    setPage(0)
+  }
+
+  function handleDirectionChange(next: DirectionFilterValue) {
+    setDirection(next)
     setPage(0)
   }
 
@@ -150,6 +175,10 @@ export function NewsPage() {
         )}
       </div>
 
+      <div className="mt-3">
+        <DirectionFilter value={direction} onChange={handleDirectionChange} />
+      </div>
+
       {newsState.status === 'loading' && (
         <div className="mt-8 flex items-center gap-3 text-gray-600">
           <span
@@ -166,7 +195,7 @@ export function NewsPage() {
           <p className="mt-1 text-sm">{newsState.message}</p>
           <button
             type="button"
-            onClick={() => loadNews(selectedTicker, page, setNewsState)}
+            onClick={() => loadNews(selectedTicker, page, direction, setNewsState)}
             className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
           >
             Reessayer
@@ -274,6 +303,13 @@ function NewsCard({ item }: { item: NewsItem }) {
         <span className="text-sm text-gray-500">
           &middot; confiance {item.confidence !== null ? `${item.confidence.toFixed(0)}%` : '?'}
         </span>
+        {item.direction_probabilities && (
+          <span
+            className={`rounded-full px-2.5 py-1 text-xs font-medium ${DIRECTION_BADGE_STYLES[dominantDirection(item.direction_probabilities)]}`}
+          >
+            {DIRECTION_LABELS[dominantDirection(item.direction_probabilities)]}
+          </span>
+        )}
         <button
           type="button"
           onClick={() => setExpanded(true)}

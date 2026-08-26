@@ -8,8 +8,11 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from reasoning.analyze_news import _build_divergence_note, _dominant_direction  # noqa: E402
-from reasoning.direction_probability import compute_direction_probabilities  # noqa: E402
+from reasoning.analyze_news import _build_divergence_note  # noqa: E402
+from reasoning.direction_probability import (  # noqa: E402
+    compute_direction_probabilities,
+    dominant_direction as _dominant_direction,
+)
 
 
 def test_dominant_direction_picks_the_largest_bucket():

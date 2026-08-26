@@ -20,8 +20,15 @@ from reasoning.analyze_news import (
     news_summary_paragraph,
     price_before_after_news,
 )
+from reasoning.daily_summary import load_latest_scores_bulk
+from reasoning.direction_probability import (
+    compute_direction_probabilities,
+    dominant_direction,
+    load_causal_effects_bulk,
+)
 
 router = APIRouter(prefix="/api/news", tags=["news"])
+VALID_DIRECTIONS = {"toutes", "hausse", "stagnation", "baisse"}
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 500
@@ -90,7 +97,7 @@ def _price_context(conn, ticker, published_at):
     }
 
 
-def _news_to_dict(conn, row):
+def _news_to_dict(conn, row, direction):
     return {
         "news_id": row["news_id"],
         "ticker": row["ticker"],
@@ -107,12 +114,42 @@ def _news_to_dict(conn, row):
         "confidence": row["confidence"],
         "summary_paragraph": news_summary_paragraph(row),
         "price_context": _price_context(conn, row["ticker"], row["published_at"]),
+        "direction_probabilities": direction,
     }
+
+
+def _build_directions_by_ticker(conn, tickers):
+    """{ticker: direction_probabilities} for every DISTINCT ticker in
+    `tickers` -- computed ONCE per ticker (not once per news item, even
+    though several news items usually share the same ticker), from two
+    bulk queries total (load_latest_scores_bulk + load_causal_effects_bulk)
+    -- never one query per row. This is the GENERAL direction (no
+    news-specific tonalite/importance folded in, unlike
+    GET /api/news/{news_id}/narrative's own enriched, news-aware
+    computation) -- the same free, Groq-less read shown everywhere else a
+    ticker's direction appears before its enriched narrative is generated."""
+    tickers = sorted({t for t in tickers if t})
+    scores = load_latest_scores_bulk(conn, tickers)
+    causal_effects = load_causal_effects_bulk(conn)
+
+    directions = {}
+    for t in tickers:
+        s = scores[t]
+        causal = causal_effects.get(t)
+        directions[t] = compute_direction_probabilities(
+            score_technique=s["technical_score"],
+            score_prix_valorisation=s["price_valuation_score"],
+            score_fondamental_reel=s["score_fondamental_reel"],
+            causal_effect=causal["effet"] if causal else None,
+            causal_confidence=causal["confiance"] if causal else None,
+        )
+    return directions
 
 
 @router.get("")
 def get_news(
     ticker: str | None = Query(None, description="Filtre sur un ticker precis"),
+    direction: str = Query("toutes", description="toutes | hausse | stagnation | baisse"),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Lignes par page"),
     offset: int = Query(0, ge=0, description="Nombre de lignes a sauter"),
     conn=Depends(get_db),
@@ -123,16 +160,41 @@ def get_news(
     (ticker-then-importance-then-recency, moot there since that page
     always scopes to one ticker first via a selectbox).
 
+    `direction` filters on each item's ticker's DOMINANT hausse/stagnation/
+    baisse scenario -- applied server-side, BEFORE pagination, same
+    reasoning as /api/opportunities' own `direction` param: this list
+    genuinely paginates (hundreds of news across many pages), so a
+    client-side filter would only narrow whatever page is currently
+    loaded. `direction_probabilities` itself is the GENERAL (non-news-
+    specific) read, computed once per distinct ticker via
+    _build_directions_by_ticker -- a pure, Groq-free computation, not the
+    enriched narrative's own per-news-item version.
+
     `limit`/`offset` paginate the already-sorted, already-filtered list,
     same convention as /api/opportunities and /api/correlations."""
     ticker = (ticker or "").strip().upper() or None
+    direction = (direction or "toutes").strip().lower()
+    if direction not in VALID_DIRECTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"direction invalide : {direction!r} (attendu : {sorted(VALID_DIRECTIONS)})",
+        )
+
     rows = load_news(conn, ticker)
+    directions_by_ticker = _build_directions_by_ticker(conn, (r["ticker"] for r in rows))
+
+    if direction != "toutes":
+        rows = [
+            r for r in rows
+            if directions_by_ticker.get(r["ticker"]) is not None
+            and dominant_direction(directions_by_ticker[r["ticker"]]) == direction
+        ]
 
     n_total = len(rows)
     page = rows[offset:offset + limit]
 
     return {
-        "news": [_news_to_dict(conn, r) for r in page],
+        "news": [_news_to_dict(conn, r, directions_by_ticker.get(r["ticker"])) for r in page],
         "n_total": n_total,
         "ticker": ticker,
         "limit": limit,

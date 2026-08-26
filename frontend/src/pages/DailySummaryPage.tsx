@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ApiError, fetchDailySummary } from '../api'
+import { DirectionFilter, dominantDirection } from '../components/DirectionFilter'
 import { SignalCard } from '../components/SignalCard'
-import type { DailySummaryResponse } from '../types'
+import type { DailySummaryResponse, DirectionFilterValue } from '../types'
 
 type SummaryState =
   | { status: 'loading' }
@@ -23,6 +24,7 @@ function loadSummary(setState: (s: SummaryState) => void) {
 
 export function DailySummaryPage() {
   const [state, setState] = useState<SummaryState>({ status: 'loading' })
+  const [direction, setDirection] = useState<DirectionFilterValue>('toutes')
 
   // Fetched once on mount only -- this page never auto-refreshes/polls,
   // matching the backend's own Groq-quota discipline: the argued-text
@@ -32,9 +34,26 @@ export function DailySummaryPage() {
     loadSummary(setState)
   }, [])
 
+  // Filtered entirely client-side -- this list has no pagination (TOP_N is
+  // a handful of signals, already loaded in full), so re-fetching from the
+  // backend for a filter change would be wasted work. See
+  // DirectionFilter.tsx's own docstring for why Opportunites/News instead
+  // filter server-side.
+  const filteredSignals = useMemo(() => {
+    if (state.status !== 'ready') return []
+    if (direction === 'toutes') return state.data.signals
+    return state.data.signals.filter(
+      (s) => s.direction_probabilities !== null && dominantDirection(s.direction_probabilities) === direction,
+    )
+  }, [state, direction])
+
   return (
     <div>
       <h1 className="text-2xl font-bold text-gray-900">Resume du jour</h1>
+
+      <div className="mt-4">
+        <DirectionFilter value={direction} onChange={setDirection} />
+      </div>
 
       {state.status === 'loading' && (
         <div className="mt-8 flex items-center gap-3 text-gray-600">
@@ -74,9 +93,13 @@ export function DailySummaryPage() {
             <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
               Aucun signal ne depasse le seuil de confiance aujourd'hui.
             </div>
+          ) : filteredSignals.length === 0 ? (
+            <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+              Aucun signal ne correspond a ce filtre de direction.
+            </div>
           ) : (
             <div className="mt-6 flex flex-col gap-4">
-              {state.data.signals.map((signal) => (
+              {filteredSignals.map((signal) => (
                 <SignalCard key={signal.ticker} signal={signal} />
               ))}
             </div>

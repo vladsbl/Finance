@@ -119,6 +119,7 @@ def test_opportunities_row_shape():
         "ticker", "nom_affiche", "priorite", "score_global",
         "score_prix_valorisation", "score_technique", "score_news",
         "score_fondamental_reel", "confiance", "explication", "date_calcul",
+        "direction_probabilities",
     }
     assert set(rows[0].keys()) == expected_keys
 
@@ -186,6 +187,39 @@ def test_opportunities_invalid_priorite_returns_422():
     resp = client.get("/api/opportunities", params={"priorite": "inexistante"})
     assert resp.status_code == 422
     assert "inexistante" in resp.json()["detail"]
+
+
+# --- direction filter -------------------------------------------------------
+
+def test_opportunities_invalid_direction_returns_422():
+    resp = client.get("/api/opportunities", params={"direction": "inexistante"})
+    assert resp.status_code == 422
+    assert "inexistante" in resp.json()["detail"]
+
+
+def test_opportunities_direction_filter_matches_only_that_dominant_scenario():
+    from reasoning.direction_probability import dominant_direction
+
+    for direction in ("hausse", "stagnation", "baisse"):
+        resp = client.get("/api/opportunities", params={"direction": direction, "limit": 500})
+        assert resp.status_code == 200
+        rows = resp.json()["opportunites"]
+        for row in rows:
+            dp = row["direction_probabilities"]
+            assert dp is not None
+            assert dominant_direction(dp) == direction
+
+
+def test_opportunities_direction_filter_reduces_or_equals_unfiltered_total():
+    unfiltered = client.get("/api/opportunities", params={"limit": 1}).json()["n_total"]
+    hausse = client.get("/api/opportunities", params={"direction": "hausse", "limit": 1}).json()["n_total"]
+    stagnation = client.get("/api/opportunities", params={"direction": "stagnation", "limit": 1}).json()["n_total"]
+    baisse = client.get("/api/opportunities", params={"direction": "baisse", "limit": 1}).json()["n_total"]
+    assert hausse <= unfiltered
+    assert stagnation <= unfiltered
+    assert baisse <= unfiltered
+    # every row with a computable direction falls into exactly one bucket
+    assert hausse + stagnation + baisse <= unfiltered
 
 
 # --- /api/tickers + /api/stock/{ticker}* ----------------------------------------
@@ -1002,6 +1036,7 @@ def test_causal_reasoning_chain_shape():
     expected_keys = {
         "id", "news_id", "news_title", "ticker_source", "chaine_raisonnement",
         "entreprises_impactees", "confiance", "model", "created_at",
+        "direction_probabilities",
     }
     assert set(chain.keys()) == expected_keys
     assert isinstance(chain["entreprises_impactees"], list)
@@ -1117,7 +1152,7 @@ def test_news_item_shape():
     expected_keys = {
         "news_id", "ticker", "title", "url", "published_at", "source", "company",
         "sector", "importance", "tonalite", "impact", "horizon", "confidence",
-        "summary_paragraph", "price_context",
+        "summary_paragraph", "price_context", "direction_probabilities",
     }
     assert set(item.keys()) == expected_keys
     assert isinstance(item["summary_paragraph"], str) and item["summary_paragraph"]
@@ -1211,6 +1246,38 @@ def test_news_limit_beyond_max_returns_422():
 def test_news_negative_offset_returns_422():
     resp = client.get("/api/news", params={"offset": -1})
     assert resp.status_code == 422
+
+
+# --- direction filter -------------------------------------------------------
+
+def test_news_invalid_direction_returns_422():
+    resp = client.get("/api/news", params={"direction": "inexistante"})
+    assert resp.status_code == 422
+    assert "inexistante" in resp.json()["detail"]
+
+
+def test_news_direction_filter_matches_only_that_dominant_scenario():
+    from reasoning.direction_probability import dominant_direction
+
+    for direction in ("hausse", "stagnation", "baisse"):
+        resp = client.get("/api/news", params={"direction": direction, "limit": 500})
+        assert resp.status_code == 200
+        items = resp.json()["news"]
+        for item in items:
+            dp = item["direction_probabilities"]
+            assert dp is not None
+            assert dominant_direction(dp) == direction
+
+
+def test_news_direction_filter_reduces_or_equals_unfiltered_total():
+    unfiltered = client.get("/api/news", params={"limit": 1}).json()["n_total"]
+    hausse = client.get("/api/news", params={"direction": "hausse", "limit": 1}).json()["n_total"]
+    stagnation = client.get("/api/news", params={"direction": "stagnation", "limit": 1}).json()["n_total"]
+    baisse = client.get("/api/news", params={"direction": "baisse", "limit": 1}).json()["n_total"]
+    assert hausse <= unfiltered
+    assert stagnation <= unfiltered
+    assert baisse <= unfiltered
+    assert hausse + stagnation + baisse <= unfiltered
 
 
 def test_news_narrative_unknown_id_returns_404():

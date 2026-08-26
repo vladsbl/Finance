@@ -54,6 +54,7 @@ from reasoning.direction_probability import (  # noqa: E402
     HORIZON_BASE,
     HORIZON_NEWS,
     compute_direction_probabilities,
+    dominant_direction,
     load_causal_effect_for_ticker,
 )
 
@@ -729,17 +730,6 @@ def _build_direction_for_news(conn, ticker, news_tonalite=None, news_importance=
     )
 
 
-def _dominant_direction(direction):
-    """'hausse' | 'stagnation' | 'baisse' -- whichever of the three is
-    largest (ties broken toward stagnation, the conservative read)."""
-    h, s, b = direction["hausse"], direction["stagnation"], direction["baisse"]
-    if h > s and h > b:
-        return "hausse"
-    if b > s and b > h:
-        return "baisse"
-    return "stagnation"
-
-
 def _build_divergence_note(direction_general, direction_with_news):
     """None if there's nothing worth flagging (either direction is
     unavailable, or both agree on which way the evidence leans); otherwise
@@ -749,8 +739,8 @@ def _build_divergence_note(direction_general, direction_with_news):
     own instruction to never leave two contradicting numbers unexplained)."""
     if not direction_general or not direction_with_news:
         return None
-    dom_general = _dominant_direction(direction_general)
-    dom_news = _dominant_direction(direction_with_news)
+    dom_general = dominant_direction(direction_general)
+    dom_news = dominant_direction(direction_with_news)
     if dom_general == dom_news:
         return None
     return (

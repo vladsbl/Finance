@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ApiError, fetchOpportunites } from '../api'
-import type { OpportunitesResponse, Priorite } from '../types'
+import { DirectionFilter, dominantDirection } from '../components/DirectionFilter'
+import type { DirectionFilterValue, OpportunitesResponse, Priorite } from '../types'
 
 type OppState =
   | { status: 'loading' }
@@ -20,10 +21,11 @@ const PAGE_SIZE = 50
 function loadOpportunites(
   priorite: Priorite,
   page: number,
+  direction: DirectionFilterValue,
   setState: (s: OppState) => void,
 ) {
   setState({ status: 'loading' })
-  fetchOpportunites(priorite, PAGE_SIZE, page * PAGE_SIZE)
+  fetchOpportunites(priorite, PAGE_SIZE, page * PAGE_SIZE, direction)
     .then((data) => setState({ status: 'ready', data }))
     .catch((err) => {
       const message =
@@ -38,24 +40,42 @@ function formatScore(score: number | null): string {
   return score === null ? 'n/a' : score.toFixed(1)
 }
 
+const DIRECTION_LABELS: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
+  hausse: 'Hausse',
+  stagnation: 'Stagnation',
+  baisse: 'Baisse',
+}
+
+const DIRECTION_COLORS: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
+  hausse: 'text-emerald-600',
+  stagnation: 'text-gray-500',
+  baisse: 'text-red-600',
+}
+
 export function OpportunitiesPage() {
   const [priorite, setPriorite] = useState<Priorite>('toutes')
+  const [direction, setDirection] = useState<DirectionFilterValue>('toutes')
   const [page, setPage] = useState(0)
   const [state, setState] = useState<OppState>({ status: 'loading' })
 
-  // Re-fetched whenever the priorite filter OR the page changes -- this is
-  // a plain click-choice filter over a fixed, tiny set of 4 tiers (same
-  // "not a searchable field" discipline as the Streamlit dashboard's
-  // st.pills for this exact filter), not a free-text search, so refetching
-  // per click/page is cheap and keeps the client simple (no need to fetch
-  // every tier/page once and filter client-side).
+  // Re-fetched whenever the priorite filter, the direction filter, OR the
+  // page changes -- `direction` is applied server-side (see api.ts's
+  // fetchOpportunites and api/routers/opportunities.py's own `direction`
+  // param), same reasoning as `priorite`: this list genuinely paginates
+  // (up to ~2000 rows), so a client-side filter would only narrow whatever
+  // page happens to be loaded.
   useEffect(() => {
-    loadOpportunites(priorite, page, setState)
-  }, [priorite, page])
+    loadOpportunites(priorite, page, direction, setState)
+  }, [priorite, direction, page])
 
   function handlePrioriteChange(next: Priorite) {
     setPriorite(next)
     setPage(0) // a new filter invalidates the old page count -- always restart at page 1
+  }
+
+  function handleDirectionChange(next: DirectionFilterValue) {
+    setDirection(next)
+    setPage(0)
   }
 
   return (
@@ -79,6 +99,10 @@ export function OpportunitiesPage() {
         ))}
       </div>
 
+      <div className="mt-3">
+        <DirectionFilter value={direction} onChange={handleDirectionChange} />
+      </div>
+
       {state.status === 'loading' && (
         <div className="mt-8 flex items-center gap-3 text-gray-600">
           <span
@@ -95,7 +119,7 @@ export function OpportunitiesPage() {
           <p className="mt-1 text-sm">{state.message}</p>
           <button
             type="button"
-            onClick={() => loadOpportunites(priorite, page, setState)}
+            onClick={() => loadOpportunites(priorite, page, direction, setState)}
             className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
           >
             Reessayer
@@ -128,6 +152,7 @@ export function OpportunitiesPage() {
                     <th className="py-2 pr-4">News</th>
                     <th className="py-2 pr-4">Fondamental reel</th>
                     <th className="py-2 pr-4">Confiance</th>
+                    <th className="py-2 pr-4">Direction</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -149,6 +174,15 @@ export function OpportunitiesPage() {
                       </td>
                       <td className="py-2 pr-4 text-gray-600">
                         {o.confiance === null ? 'n/a' : `${o.confiance.toFixed(0)}%`}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {o.direction_probabilities === null ? (
+                          <span className="text-gray-400">n/a</span>
+                        ) : (
+                          <span className={`font-medium ${DIRECTION_COLORS[dominantDirection(o.direction_probabilities)]}`}>
+                            {DIRECTION_LABELS[dominantDirection(o.direction_probabilities)]}
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ))}

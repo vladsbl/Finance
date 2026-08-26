@@ -22,12 +22,16 @@ from reasoning.causal_reasoning import (
     parse_entreprises_impactees,
     run_causal_reasoning,
 )
-from reasoning.daily_summary import staleness_note
+from reasoning.daily_summary import load_latest_scores_bulk, staleness_note
+from reasoning.direction_probability import (
+    compute_direction_probabilities,
+    load_causal_effects_bulk,
+)
 
 router = APIRouter(prefix="/api/causal-reasoning", tags=["causal-reasoning"])
 
 
-def _chain_to_dict(chain):
+def _chain_to_dict(chain, direction):
     return {
         "id": chain["id"],
         "news_id": chain["news_id"],
@@ -38,6 +42,7 @@ def _chain_to_dict(chain):
         "confiance": chain["confiance"],
         "model": chain["model"],
         "created_at": chain["created_at"],
+        "direction_probabilities": direction,
     }
 
 
@@ -51,13 +56,37 @@ def get_causal_chains(limit: int = CAUSAL_CHAIN_DISPLAY_LIMIT, conn=Depends(get_
     React can render each entry's `effet` (positif/negatif/neutre) as a
     real field instead of re-parsing JSON client-side.
 
+    `direction_probabilities` is the chain's own ticker_source's GENERAL
+    direction (no news-specific context, same free/Groq-less computation
+    as /api/opportunities and /api/news) -- there is no `direction` query
+    param here unlike those two: this route has no real pagination (a
+    fixed, tiny LIMIT, no offset), the whole list is already loaded in one
+    shot by the frontend, so filtering by dominant scenario happens
+    entirely client-side with no correctness downside.
+
     `staleness` mirrors /api/opportunities' own field: a human-readable
     note when the most recent chain is more than a few days old, null when
     fresh or when there are no chains at all."""
     chains = load_causal_chains(conn, limit)
+
+    tickers = sorted({c["ticker_source"] for c in chains if c["ticker_source"]})
+    scores = load_latest_scores_bulk(conn, tickers)
+    causal_effects = load_causal_effects_bulk(conn)
+    directions = {}
+    for t in tickers:
+        s = scores[t]
+        causal = causal_effects.get(t)
+        directions[t] = compute_direction_probabilities(
+            score_technique=s["technical_score"],
+            score_prix_valorisation=s["price_valuation_score"],
+            score_fondamental_reel=s["score_fondamental_reel"],
+            causal_effect=causal["effet"] if causal else None,
+            causal_confidence=causal["confiance"] if causal else None,
+        )
+
     latest_date = (chains[0]["created_at"] or "")[:10] if chains else None
     return {
-        "chains": [_chain_to_dict(c) for c in chains],
+        "chains": [_chain_to_dict(c, directions.get(c["ticker_source"])) for c in chains],
         "n_total": len(chains),
         "staleness": staleness_note(latest_date) if latest_date else None,
     }

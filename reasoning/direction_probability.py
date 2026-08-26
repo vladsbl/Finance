@@ -149,26 +149,36 @@ def _news_lean(news_tonalite, news_importance):
     return base * scale
 
 
-def load_causal_effect_for_ticker(conn, ticker):
-    """Most recent causal-chain verdict on `ticker` AS AN IMPACTED COMPANY,
-    or None. Deliberately does NOT look at chains where `ticker` is the
-    chain's own ticker_source: causal_chains.entreprises_impactees already
-    carries a STRUCTURED effet field (positif/negatif/neutre) for each
-    company a chain names as impacted (see reasoning/causal_reasoning.py),
-    but the chain's own source company has no equivalent structured
-    self-verdict -- only free-form prose. Reusing the structured field for
-    impacted companies keeps this fully traceable (a real value another
-    module already computed); guessing a source company's own direction
-    from its prose would not be.
+def load_causal_effects_bulk(conn):
+    """{ticker: {"effet", "confiance", "date", "entreprise"}} for EVERY
+    ticker that appears as an IMPACTED company in any recent causal chain
+    -- one single pass over causal_chains, instead of re-scanning it once
+    per ticker. Built for list views that need this for many tickers at
+    once (Opportunites du jour, News & Analyse IA, Raisonnement causal):
+    calling load_causal_effect_for_ticker() in a loop over hundreds of
+    rows would re-parse the same ~500 causal_chains rows hundreds of
+    times for no reason, since the underlying data doesn't change between
+    those calls within one request.
+
+    Deliberately does NOT look at chains where a ticker is the chain's own
+    ticker_source: causal_chains.entreprises_impactees already carries a
+    STRUCTURED effet field (positif/negatif/neutre) for each company a
+    chain names as impacted (see reasoning/causal_reasoning.py), but the
+    chain's own source company has no equivalent structured self-verdict
+    -- only free-form prose. Reusing the structured field for impacted
+    companies keeps this fully traceable; guessing a source company's own
+    direction from its prose would not be.
 
     Scans the most recent chains (bounded, not the whole table -- causal
     chains accumulate slowly, capped by CAUSAL_REASONING_DAILY_LIMIT=5/day)
-    for the first (i.e. most recent) one naming this ticker."""
+    and keeps, per ticker, only the FIRST (i.e. most recent, since the
+    query is already ordered newest-first) matching entry."""
     rows = conn.execute(
         "SELECT entreprises_impactees, confiance, created_at FROM causal_chains "
         "WHERE entreprises_impactees IS NOT NULL "
         "ORDER BY created_at DESC LIMIT 500"
     ).fetchall()
+    result = {}
     for impactees_json, confiance, created_at in rows:
         try:
             impactees = json.loads(impactees_json) if impactees_json else []
@@ -177,16 +187,43 @@ def load_causal_effect_for_ticker(conn, ticker):
         for entry in impactees:
             if not isinstance(entry, dict):
                 continue
-            if (entry.get("ticker") or "").strip().upper() == ticker.upper():
-                effet = str(entry.get("effet") or "").strip().lower()
-                if effet in ("positif", "negatif", "neutre"):
-                    return {
-                        "effet": effet,
-                        "confiance": confiance,
-                        "date": (created_at or "")[:10],
-                        "entreprise": entry.get("entreprise"),
-                    }
-    return None
+            ticker = (entry.get("ticker") or "").strip().upper()
+            if not ticker or ticker in result:
+                continue  # a more recent chain already set this ticker's verdict
+            effet = str(entry.get("effet") or "").strip().lower()
+            if effet in ("positif", "negatif", "neutre"):
+                result[ticker] = {
+                    "effet": effet,
+                    "confiance": confiance,
+                    "date": (created_at or "")[:10],
+                    "entreprise": entry.get("entreprise"),
+                }
+    return result
+
+
+def load_causal_effect_for_ticker(conn, ticker):
+    """Single-ticker convenience wrapper around load_causal_effects_bulk()
+    -- same result, same cost (both scan the same bounded causal_chains
+    window), kept for the existing single-ticker call sites
+    (reasoning/daily_summary.py's build_signal, api/routers/stock.py,
+    reasoning/analyze_news.py's per-news narrative) where fetching the
+    bulk dict just to read one key would be a pointless indirection."""
+    return load_causal_effects_bulk(conn).get(ticker.upper())
+
+
+def dominant_direction(direction):
+    """'hausse' | 'stagnation' | 'baisse' -- whichever of the three
+    percentages is largest (ties broken toward stagnation, the
+    conservative read). Shared by every list-view filter (Opportunites,
+    News, Raisonnement causal) and by reasoning/analyze_news.py's own
+    divergence detection, so "what counts as the dominant scenario" is
+    defined in exactly one place."""
+    h, s, b = direction["hausse"], direction["stagnation"], direction["baisse"]
+    if h > s and h > b:
+        return "hausse"
+    if b > s and b > h:
+        return "baisse"
+    return "stagnation"
 
 
 def _largest_remainder_round(values):
