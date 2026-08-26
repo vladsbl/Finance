@@ -1,7 +1,39 @@
 import { useEffect, useState } from 'react'
-import { ApiError, fetchNews, fetchTickers } from '../api'
+import { ApiError, fetchNews, fetchNewsNarrative, fetchStockDetail, fetchTickers } from '../api'
+import { CompanyDescription } from '../components/CompanyDescription'
+import { DirectionProbabilityBar } from '../components/DirectionProbabilityBar'
+import { ExpandModal } from '../components/ExpandModal'
+import { MarkdownText } from '../components/MarkdownText'
+import { PriceHeadline } from '../components/PriceHeadline'
 import { TickerSearch } from '../components/TickerSearch'
-import type { NewsItem, NewsPriceContext, NewsResponse, TickerListEntry } from '../types'
+import type {
+  DirectionProbabilities,
+  NewsItem,
+  NewsNarrativeSource,
+  NewsPriceContext,
+  NewsResponse,
+  StockDetail,
+  TickerListEntry,
+} from '../types'
+
+type StockDetailState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; data: StockDetail }
+
+// Kept local to each card: opening one news item's enriched narrative must
+// never block or reset another's (each click is its own independent GET,
+// matching the backend's own dedicated per-news-item quota/cache).
+type NarrativeState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | {
+      status: 'done'
+      texte: string | null
+      source: NewsNarrativeSource
+      direction: DirectionProbabilities | null
+    }
 
 type NewsState =
   | { status: 'loading' }
@@ -158,8 +190,8 @@ export function NewsPage() {
             </div>
           ) : (
             <div className="mt-4 flex flex-col gap-4">
-              {newsState.data.news.map((item, i) => (
-                <NewsCard key={`${item.url ?? item.title}-${i}`} item={item} />
+              {newsState.data.news.map((item) => (
+                <NewsCard key={item.news_id} item={item} />
               ))}
             </div>
           )}
@@ -197,6 +229,36 @@ function NewsCard({ item }: { item: NewsItem }) {
   const meta = [item.company, item.sector, item.horizon, item.source ? `source: ${item.source}` : null]
     .filter(Boolean)
     .join(' · ')
+  const [expanded, setExpanded] = useState(false)
+  const [stockState, setStockState] = useState<StockDetailState>({ status: 'loading' })
+  const [narrative, setNarrative] = useState<NarrativeState>({ status: 'idle' })
+
+  useEffect(() => {
+    if (!expanded || !item.ticker) return
+    setStockState({ status: 'loading' })
+    fetchStockDetail(item.ticker)
+      .then((data) => setStockState({ status: 'ready', data }))
+      .catch((err) => {
+        const message = err instanceof ApiError ? err.message : "Erreur inattendue lors du chargement de l'action."
+        setStockState({ status: 'error', message })
+      })
+  }, [expanded, item.ticker])
+
+  async function handleLoadNarrative() {
+    setNarrative({ status: 'loading' })
+    try {
+      const result = await fetchNewsNarrative(item.news_id)
+      setNarrative({
+        status: 'done',
+        texte: result.texte,
+        source: result.source,
+        direction: result.direction_probabilities,
+      })
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Erreur inattendue lors de l'appel API."
+      setNarrative({ status: 'error', message })
+    }
+  }
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
@@ -212,7 +274,14 @@ function NewsCard({ item }: { item: NewsItem }) {
         <span className="text-sm text-gray-500">
           &middot; confiance {item.confidence !== null ? `${item.confidence.toFixed(0)}%` : '?'}
         </span>
-        <span className="ml-auto text-xs text-gray-400">
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="ml-auto rounded-md border border-gray-300 px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+        >
+          Agrandir
+        </button>
+        <span className="text-xs text-gray-400">
           {(item.published_at || '').slice(0, 10)}
         </span>
       </div>
@@ -233,11 +302,156 @@ function NewsCard({ item }: { item: NewsItem }) {
       </h3>
       {meta && <p className="mt-1 text-xs text-gray-500">{meta}</p>}
 
+      {item.ticker && (
+        <div className="mt-2">
+          <CompanyDescription ticker={item.ticker} />
+        </div>
+      )}
+
       <p className="mt-3 text-sm text-gray-800">{item.summary_paragraph}</p>
 
       <p className="mt-3 text-xs text-gray-500">
         Prix avant/apres cette news : {formatPriceContext(item.price_context)}
       </p>
+
+      <ExpandModal isOpen={expanded} onClose={() => setExpanded(false)} title={item.title}>
+        <div className="flex flex-col gap-5">
+          {meta && <p className="text-xs text-gray-500">{meta}</p>}
+
+          {item.ticker && <CompanyDescription ticker={item.ticker} />}
+
+          <p className="text-base text-gray-800">{item.summary_paragraph}</p>
+
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Impact prix autour de la news</h3>
+            <p className="mt-1 text-sm text-gray-700">{formatPriceContext(item.price_context)}</p>
+          </div>
+
+          {item.ticker && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">
+                Contexte actuel de {item.ticker}
+              </h3>
+              {stockState.status === 'loading' && (
+                <p className="mt-1 text-sm text-gray-500">Chargement...</p>
+              )}
+              {stockState.status === 'error' && (
+                <p className="mt-1 text-sm text-red-600">{stockState.message}</p>
+              )}
+              {stockState.status === 'ready' && (
+                <div className="mt-2">
+                  <PriceHeadline
+                    price={stockState.data.prix_eur !== null ? stockState.data.prix_eur : stockState.data.current_price}
+                    currency={stockState.data.prix_eur !== null ? 'EUR' : stockState.data.devise}
+                    variationPct={stockState.data.variations ? stockState.data.variations['1j'] : null}
+                  />
+                  <div className="mt-3">
+                    {/* Once the enriched narrative below has been generated,
+                        it carries a probability split that also factors in
+                        THIS news item's own tonalite/importance (see
+                        reasoning/direction_probability.py's news-context
+                        parameters) -- showing that one here instead of the
+                        ticker's general-only read is what makes this number
+                        agree with the text just below it, each clearly
+                        scoped by its own horizon label. */}
+                    <DirectionProbabilityBar
+                      direction={
+                        narrative.status === 'done' && narrative.direction
+                          ? narrative.direction
+                          : stockState.data.direction_probabilities
+                      }
+                    />
+                  </div>
+                  <div className="mt-3 flex gap-6 text-xs">
+                    <div>
+                      <span className="text-gray-500">Score final</span>
+                      <p className="text-sm font-semibold text-gray-900">
+                        {stockState.data.final_score !== null ? stockState.data.final_score.toFixed(0) : 'n/a'}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Confiance</span>
+                      <p className="text-sm font-semibold text-gray-900">
+                        {stockState.data.confidence !== null ? `${stockState.data.confidence.toFixed(0)}%` : 'n/a'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="border-t border-gray-100 pt-4">
+            <h3 className="text-sm font-semibold text-gray-900">Analyse enrichie (IA)</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Explication redigee (de quoi parle la news, pourquoi elle compte, impact sur
+              l'entreprise et ses entreprises liees) -- generee a la demande, mise en cache
+              ensuite.
+            </p>
+            <div className="mt-3">
+              {narrative.status === 'idle' && (
+                <button
+                  type="button"
+                  onClick={handleLoadNarrative}
+                  className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+                >
+                  Voir l'analyse enrichie (IA)
+                </button>
+              )}
+
+              {narrative.status === 'loading' && (
+                <div className="flex items-center gap-2 text-sm text-gray-500">
+                  <span
+                    className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
+                    aria-hidden="true"
+                  />
+                  Generation en cours...
+                </div>
+              )}
+
+              {narrative.status === 'error' && (
+                <div className="text-sm text-red-600">
+                  {narrative.message}
+                  <button
+                    type="button"
+                    onClick={handleLoadNarrative}
+                    className="ml-2 font-medium underline hover:no-underline"
+                  >
+                    Reessayer
+                  </button>
+                </div>
+              )}
+
+              {narrative.status === 'done' && narrative.texte && (
+                <div>
+                  <MarkdownText>{narrative.texte}</MarkdownText>
+                  <p className="mt-2 text-xs text-gray-400">
+                    {narrative.source === 'cache' ? 'Depuis le cache' : "Generee a l'instant"}
+                  </p>
+                </div>
+              )}
+
+              {narrative.status === 'done' && !narrative.texte && (
+                <p className="text-sm text-gray-500">
+                  Analyse enrichie indisponible pour l'instant (quota dedie atteint, cle API
+                  absente, ou erreur reseau cote serveur).
+                </p>
+              )}
+            </div>
+          </div>
+
+          {item.url && (
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm text-indigo-700 hover:underline"
+            >
+              Lire l'article source
+            </a>
+          )}
+        </div>
+      </ExpandModal>
     </div>
   )
 }

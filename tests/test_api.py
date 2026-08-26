@@ -1115,7 +1115,7 @@ def test_news_item_shape():
         return  # nothing analysed yet in this environment -- not a failure
     item = items[0]
     expected_keys = {
-        "ticker", "title", "url", "published_at", "source", "company",
+        "news_id", "ticker", "title", "url", "published_at", "source", "company",
         "sector", "importance", "tonalite", "impact", "horizon", "confidence",
         "summary_paragraph", "price_context",
     }
@@ -1211,3 +1211,27 @@ def test_news_limit_beyond_max_returns_422():
 def test_news_negative_offset_returns_422():
     resp = client.get("/api/news", params={"offset": -1})
     assert resp.status_code == 422
+
+
+def test_news_narrative_unknown_id_returns_404():
+    resp = client.get("/api/news/999999999/narrative")
+    assert resp.status_code == 404
+
+
+def test_news_narrative_known_id_never_calls_groq_during_tests():
+    """Mirrors test_argued_text_known_ticker_never_calls_groq_during_tests:
+    get_or_generate_news_narrative has the same PYTEST_CURRENT_TEST guard as
+    add_argued_texts, so a real news_id must come back "cache" (already
+    generated during manual testing) or "unavailable" -- never "generated"
+    during a pytest run."""
+    items = client.get("/api/news", params={"limit": 1}).json()["news"]
+    if not items:
+        return  # nothing analysed yet in this environment -- not a failure
+    news_id = items[0]["news_id"]
+
+    resp = client.get(f"/api/news/{news_id}/narrative")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["news_id"] == news_id
+    assert body["source"] in ("cache", "unavailable")
+    assert set(body.keys()) == {"news_id", "texte", "direction_probabilities", "source"}

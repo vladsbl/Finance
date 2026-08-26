@@ -49,6 +49,13 @@ CA_BUNDLE = configure_ca_bundle(DATA_DIR)
 # Local (no-LLM) importance scoring, used to order candidates before the daily
 # quota cap so the Groq budget goes to the news that matter most.
 from reasoning.prioritize_news import compute_scores as compute_priority_scores  # noqa: E402
+from graph.build_graph import build_graph, direct_relations, load_relations  # noqa: E402
+from reasoning.direction_probability import (  # noqa: E402
+    HORIZON_BASE,
+    HORIZON_NEWS,
+    compute_direction_probabilities,
+    load_causal_effect_for_ticker,
+)
 
 # GROQ_MODEL/MAX_RETRIES/BACKOFF_BASE/MAX_ATTEMPTS_PER_RUN/
 # MAX_CONSECUTIVE_FAILURES: shared across every Groq-calling module -- see
@@ -195,15 +202,18 @@ def prefilter(rows, analysed_titles):
 
 # --- Daily usage counter ---------------------------------------------------
 
-def get_usage(conn, day):
-    row = conn.execute("SELECT calls FROM llm_usage WHERE day = ?", (day,)).fetchone()
+def get_usage(conn, day, table="llm_usage"):
+    # `table` is always one of this module's own hardcoded constants (never
+    # external/user input) -- see reasoning/daily_summary.py's identical
+    # convention for its own two quota tables.
+    row = conn.execute(f"SELECT calls FROM {table} WHERE day = ?", (day,)).fetchone()
     return row[0] if row else 0
 
 
-def bump_usage(conn, day):
+def bump_usage(conn, day, table="llm_usage"):
     conn.execute(
-        "INSERT INTO llm_usage (day, calls) VALUES (?, 1) "
-        "ON CONFLICT(day) DO UPDATE SET calls = calls + 1",
+        f"INSERT INTO {table} (day, calls) VALUES (?, 1) "
+        f"ON CONFLICT(day) DO UPDATE SET calls = calls + 1",
         (day,),
     )
     conn.commit()
@@ -331,7 +341,7 @@ def analyse_with_retry(client, ticker, title, summary):
 # converts back to a DataFrame for its existing pandas-based iteration.
 
 NEWS_SQL = """
-SELECT n.ticker, n.title, n.url, n.published_at, n.source,
+SELECT n.id AS news_id, n.ticker, n.title, n.url, n.published_at, n.source,
        a.company, a.sector, a.importance, a.tonalite, a.impact,
        a.horizon, a.confidence
 FROM news_analysis a
@@ -340,7 +350,7 @@ ORDER BY n.published_at DESC;
 """
 
 NEWS_BY_TICKER_SQL = """
-SELECT n.ticker, n.title, n.url, n.published_at, n.source,
+SELECT n.id AS news_id, n.ticker, n.title, n.url, n.published_at, n.source,
        a.company, a.sector, a.importance, a.tonalite, a.impact,
        a.horizon, a.confidence
 FROM news_analysis a
@@ -444,6 +454,457 @@ def news_summary_paragraph(row):
     if horizon:
         sentences.append(f"Horizon concerne : {horizon}.")
     return " ".join(sentences)
+
+
+# --- Enriched narrative (LLM, ON-DEMAND ONLY) -------------------------------
+#
+# news_summary_paragraph() above stays free (no LLM call, assembled from
+# already-stored fields) because it is rendered for EVERY row of a news
+# list -- up to 50/page, and the list itself can be paged through
+# thousands of items, so calling Groq there would mean tens of Groq calls
+# per single page load. The richer, AI-written briefing this section adds
+# (what the news concretely means, its key facts, and its likely impact on
+# the ticker AND its Knowledge-Graph-related companies -- price and the
+# hausse/stagnation/baisse split are shown separately by the frontend's own
+# PriceHeadline/DirectionProbabilityBar, never repeated in this text) is
+# instead generated ON DEMAND for ONE news item at a time -- same "click a
+# button, generate just this one"
+# pattern as reasoning/daily_summary.py's argued text for a signal/ticker,
+# with its OWN separate quota pool (NEWS_NARRATIVE_DAILY_LIMIT,
+# llm_usage_news_narrative) so it can never compete with, or be crowded
+# out by, the existing per-item importance/tonalite/impact analysis quota
+# (DAILY_CALL_LIMIT/llm_usage above) or daily_summary.py's own two pools.
+# Cached forever per news_id (not per-day: a past news item's story never
+# changes) in news_narratives, so each item is ever generated at most once.
+
+CREATE_NARRATIVES_SQL = """
+CREATE TABLE IF NOT EXISTS news_narratives (
+    news_id               INTEGER PRIMARY KEY,
+    texte                 TEXT NOT NULL,
+    direction_hausse      INTEGER,
+    direction_stagnation  INTEGER,
+    direction_baisse      INTEGER,
+    direction_horizon     TEXT,
+    direction_explication TEXT,
+    model                 TEXT,
+    created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (news_id) REFERENCES news_raw (id)
+);
+"""
+
+
+def _ensure_narratives_horizon_column(conn):
+    """CREATE TABLE IF NOT EXISTS is a no-op on an already-existing table,
+    so a news_narratives table created before direction_horizon existed
+    (2026-08-25's first version of this feature) needs an explicit
+    migration -- not just a wider CREATE statement above, which only
+    matters for a brand-new database."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(news_narratives)")}
+    if "direction_horizon" not in columns:
+        conn.execute("ALTER TABLE news_narratives ADD COLUMN direction_horizon TEXT")
+        conn.commit()
+
+CREATE_USAGE_NARRATIVE_SQL = """
+CREATE TABLE IF NOT EXISTS llm_usage_news_narrative (
+    day   TEXT PRIMARY KEY,
+    calls INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+# Re-measured for real on 2026-08-26 against the live Groq API,
+# openai/gpt-oss-120b, after the structured-briefing rewrite (SYSTEM_PROMPT_
+# NARRATIVE below) added the news's own raw summary_brut text as input (the
+# only source of real figures/quotes) and a richer Markdown-sectioned
+# output: 4 real news items, GLW/RF/JPM/UBER, spanning "no related
+# companies" to JPM's 6 -- 1368 to 1836 tokens/call, ~1685 average. Cost
+# roughly 1.6-1.7x the previous plain-paragraph version's measured 1056
+# tokens/call (see git history for that measurement) -- the summary_brut
+# input and the extra section headers/bullets are real, not free.
+# Re-measured again the same day after adding the probability-calibration
+# rules (the "certainty must match hausse/stagnation/baisse, not the raw
+# news tonalite" fix, and the emphatic no-percentage-leak instructions it
+# took two iterations to actually enforce -- the model quoted "72 %"
+# verbatim the first time despite being told not to): RF, 2512 tokens/call
+# (1800 prompt + 712 completion) -- the longer system prompt (now
+# permanently included in every call) accounts for the increase, not a
+# per-item variable.
+# NEWS_NARRATIVE_DAILY_LIMIT lowered from 50 to 30 to compensate for the
+# EARLIER increase: even at a worse-than-observed ~2700 tokens/call
+# (matching this latest 2512 measurement), 30/day is ~81k tokens/day,
+# still comfortably inside the shared 200k TPD budget on a day
+# analyze_news.py's own quota is also busy, while remaining far more than
+# anyone will plausibly click through by hand (this is opt-in per news
+# item, a button click, not a page load) -- no further change needed.
+NEWS_NARRATIVE_DAILY_LIMIT = 30
+
+# Truncated, not the full article: summary_brut is the scraped RSS
+# summary (median ~170 chars, p90 ~500, occasional outliers up to ~3000) --
+# this is the ONLY place actual figures (price targets, EPS, revenue
+# guidance) and analyst quotes can come from, since importance/tonalite/
+# impact are themselves short LLM-derived labels with no numbers in them.
+# Capped so a rare long outlier can't blow up prompt cost.
+MAX_SUMMARY_BRUT_CHARS = 1500
+
+SYSTEM_PROMPT_NARRATIVE = (
+    "Tu es un analyste financier qui rédige, en français, un briefing "
+    "structuré et rapide à lire sur une news -- pas un paragraphe dense, un "
+    "vrai format de briefing. Lecteur non trader professionnel : reste "
+    "accessible, sans jargon non expliqué. Positionnement moyen/long terme "
+    "(1 semaine à 1 an) -- jamais de day trading, jamais de prix d'entrée "
+    "ou de stop-loss précis.\n\n"
+    "Règle absolue : reste strictement fidèle au texte source fourni "
+    "ci-dessous -- n'invente aucun fait, aucun chiffre, aucune citation, "
+    "aucune entreprise liée qui ne soit pas explicitement listée. Si le "
+    "texte source ne contient pas de chiffre précis ou de citation "
+    "d'analyste, ne dis JAMAIS le contraire : dis simplement que la source "
+    "ne fournit pas ce niveau de détail, n'en invente aucun.\n\n"
+    "Important : le lecteur voit déjà, séparément, la description de "
+    "l'entreprise, le prix actuel et les probabilités hausse/stagnation/"
+    "baisse -- NE LES RÉPÈTE JAMAIS dans ce texte, sous AUCUNE forme, meme "
+    "reformulee ou approximee. Interdiction stricte d'ecrire des tournures "
+    "comme \"avec une probabilite de hausse de 72 %\", \"X % de chances\", "
+    "\"les indicateurs donnent Y % de probabilite\" ou tout autre chiffre "
+    "de pourcentage directionnel dans le texte -- aucun chiffre de "
+    "probabilité, aucun cours de bourse. Ne présente pas non plus "
+    "l'entreprise en début de texte : va directement au sujet de LA "
+    "NEWS.\n\n"
+    "Calibrage de la certitude (règle absolue) : les 3 probabilités "
+    "hausse/stagnation/baisse fournies ci-dessous SERVENT UNIQUEMENT A "
+    "CHOISIR TON NIVEAU DE CERTITUDE (des mots comme \"probablement\", "
+    "\"incertain\", \"pourrait\"), JAMAIS a etre ecrites ou paraphrasees "
+    "en chiffre dans le texte -- jamais la tonalité brute de la news. "
+    "Même une news au ton très négatif ou très positif ne justifie PAS un "
+    "texte tranché si les probabilités ne le sont pas : une news alarmante "
+    "avec hausse 22 % / stagnation 53 % / baisse 25 % ne doit PAS produire "
+    "un texte qui annonce une baisse quasi certaine -- stagnation est ici "
+    "le scénario dominant, le texte doit le refléter (incertitude, "
+    "attentisme), pas la tonalité seule. Règles précises :\n"
+    "- Un scénario ne peut être affirmé avec assurance QUE s'il dépasse "
+    "60 % -- utilise alors un langage clair mais jamais absolu "
+    "(\"probablement\", pas \"certainement\"), et SANS jamais citer le "
+    "chiffre lui-meme.\n"
+    "- Si aucun scénario ne dépasse 60 %, ou si les deux scénarios "
+    "directionnels sont proches (écart de 10 points ou moins), exprime "
+    "explicitement l'incertitude (\"la situation reste incertaine\", "
+    "\"aucune tendance nette ne se dégage\", \"à surveiller plutôt qu'à "
+    "trancher\") -- ne choisis JAMAIS un camp comme si c'était clair.\n"
+    "- Si stagnation est le scénario dominant, dis-le explicitement (ex: "
+    "\"le marché pourrait rester attentiste\", \"pas de mouvement clair "
+    "attendu à court terme\") plutôt que de ne parler que de hausse ou de "
+    "baisse.\n\n"
+    "Format Markdown (le rendu gère gras/puces/citations -- PAS d'emoji, "
+    "jamais). Longueur IMPERATIVE : 300 mots au total maximum. Structure "
+    "EXACTE, dans cet ordre :\n\n"
+    "1. Une phrase d'ouverture (pas de titre) qui identifie clairement de "
+    "quoi parle la news et qui est concerné -- pas de description "
+    "generale de l'entreprise, uniquement le sujet de cette news precise.\n\n"
+    "2. \"**En resume**\" suivi d'une liste a puces (3 a 5 puces) des faits "
+    "cles de la news. GARDE les chiffres precis presents dans le texte "
+    "source (objectifs de prix, prevision de chiffre d'affaires, EPS, "
+    "pourcentages de croissance, etc.) -- mets-les en **gras** dans la "
+    "puce concernee. N'invente jamais un chiffre absent du texte source.\n\n"
+    "3. UNIQUEMENT si le texte source NOMME explicitement une source "
+    "identifiable (un analyste, une banque, un dirigeant nomme, une "
+    "agence) ET rapporte precisement son avis ou sa declaration : resume "
+    "ce message en une phrase, en citation Markdown (ligne commencant par "
+    "\"> \"). Une description vague type \"avis mitiges\" ou \"opinions "
+    "partagees\" SANS source nommee ne compte PAS -- ne fabrique jamais "
+    "une citation ou une source a partir de ca. Si aucune source nommee "
+    "n'est identifiable : n'ecris RIEN pour cette section -- pas de "
+    "titre, pas de \">\", pas de phrase generique, pas de ligne vide "
+    "dediee -- passe directement au point suivant comme si ce point "
+    "n'existait pas.\n\n"
+    "4. Si le texte source mentionne explicitement d'autres avis, "
+    "objectifs ou notations differents et attribuables (ex: un autre "
+    "analyste nomme, un consensus chiffre), une phrase de mise en "
+    "perspective. Sinon : n'ecris RIEN pour cette section, meme regle "
+    "qu'au point 3 (aucun residu, aucune ligne vide, aucun symbole de "
+    "citation orphelin).\n\n"
+    "5. \"**Ce que ca signifie pour l'action {NOM_TICKER}**\" suivi d'une "
+    "interpretation claire et directe de l'impact potentiel, 2-3 phrases "
+    "courtes maximum -- respecte STRICTEMENT la regle de calibrage de la "
+    "certitude ci-dessus (les probabilites fournies, pas la tonalite). "
+    "IMPORTANT : si une divergence entre le signal general "
+    "du ticker et cette news specifique est signalee ci-dessous (deux "
+    "chiffres deja calcules, jamais a recalculer toi-meme), explique-la "
+    "explicitement ici -- ex: \"a court terme, pression negative probable ; "
+    "les indicateurs techniques restent toutefois positifs sur un horizon "
+    "plus long\" -- ne laisse JAMAIS les deux lectures se contredire sans "
+    "explication. Si aucune divergence n'est signalee, ignore ce point.\n\n"
+    "6. UNIQUEMENT si des entreprises liees sont listees ci-dessous : "
+    "\"**Entreprises liees a surveiller**\" suivi d'une liste a puces, une "
+    "puce par entreprise, expliquant brievement comment cette news "
+    "pourrait l'affecter. Si aucune entreprise liee n'est fournie, omets "
+    "entierement cette section (jamais de section vide, jamais "
+    "d'entreprise inventee).\n\n"
+    "Ton direct, phrases courtes, **gras** sur les points cles pour une "
+    "lecture rapide. Reponds uniquement avec le texte en Markdown, rien "
+    "d'autre (pas de preambule, pas de \"Voici le briefing\")."
+)
+
+
+def build_news_narrative_prompt(row, related_companies, direction=None, divergence_note=None):
+    nom_affiche = row["company"] or row["ticker"]
+    summary = (row["summary_brut"] or "").strip()
+    if len(summary) > MAX_SUMMARY_BRUT_CHARS:
+        summary = summary[:MAX_SUMMARY_BRUT_CHARS] + "..."
+
+    lines = [
+        f"Ticker : {row['ticker']} ({nom_affiche})",
+        f"Titre de la news : {row['title']}",
+        "Texte source de la news (peut etre en anglais -- synthetise en francais) :",
+        summary if summary else "(aucun texte source disponible au-dela du titre)",
+        f"\nImportance : {row['importance']}/10, tonalite {row['tonalite']}, "
+        f"horizon {row['horizon'] or 'non precise'}",
+        f"Impact identifie par l'analyse existante : {row['impact'] or 'non precise'}",
+    ]
+    if related_companies:
+        parts = [f"{rtype}: {', '.join(names)}" for rtype, names in related_companies.items()]
+        lines.append("Entreprises liees (graphe de connaissances) : " + " | ".join(parts))
+    else:
+        lines.append("Aucune entreprise liee trouvee dans le graphe de connaissances pour ce ticker.")
+
+    # This is the ONLY thing section 5's degree of confidence is allowed to
+    # be calibrated against -- NOT the news's raw tonalite, which is why a
+    # sharply negative tonalite could previously produce a confidently
+    # bearish text even when stagnation was the actual dominant bucket
+    # (e.g. JPM: hausse 22 / stagnation 53 / baisse 25 -- nowhere near a
+    # clear "baisse attendue"). Never to be echoed verbatim in the output
+    # (see SYSTEM_PROMPT_NARRATIVE's "Important" block) -- it is
+    # calibration input only, the percentages themselves are already shown
+    # separately by the frontend.
+    if direction:
+        lines.append(
+            f"\nProbabilites deja calculees (hausse/stagnation/baisse) -- "
+            f"CES CHIFFRES NE DOIVENT JAMAIS APPARAITRE, MEME REFORMULES, "
+            f"DANS LE TEXTE : ils servent UNIQUEMENT a choisir ton niveau de "
+            f"certitude (assure / incertain / attentiste) dans la section 5 : "
+            f"hausse {direction['hausse']}% / stagnation {direction['stagnation']}% / "
+            f"baisse {direction['baisse']}% ({direction['horizon']})."
+        )
+    else:
+        lines.append(
+            "\nAucune probabilite directionnelle disponible pour ce ticker -- "
+            "reste general dans la section 5, n'affirme aucune direction precise."
+        )
+
+    if divergence_note:
+        lines.append(f"\n{divergence_note}")
+
+    lines.append(
+        f"\nRedige le briefing structure demande, en remplacant "
+        f"{{NOM_TICKER}} par \"{row['ticker']}\" dans le titre de la "
+        f"section 5, uniquement a partir des elements ci-dessus."
+    )
+    return "\n".join(lines)
+
+
+def _build_direction_for_news(conn, ticker, news_tonalite=None, news_importance=None):
+    """Same compute_direction_probabilities() reused by
+    reasoning/daily_summary.py -- see that module's build_signal() for the
+    Resume-du-jour/Analyse-d'une-action equivalent. Local import: avoids a
+    module-load-time dependency from this file onto daily_summary.py's own
+    (heavier) import chain, matching the lazy-import convention already
+    used elsewhere in this project for cross-module reuse.
+
+    `news_tonalite`/`news_importance` (default None, i.e. the ticker's
+    GENERAL state only) let a caller fold in ONE specific news item's own
+    sentiment -- see compute_direction_probabilities' own docstring for
+    why this exists: without it, the percentages shown on the News page
+    never reflected the very news item displayed right above them."""
+    from reasoning.daily_summary import load_ticker_detail
+
+    detail = load_ticker_detail(conn, ticker)
+    if detail is None:
+        return None
+    causal = load_causal_effect_for_ticker(conn, ticker)
+    return compute_direction_probabilities(
+        score_technique=detail["technical_score"],
+        score_prix_valorisation=detail["price_valuation_score"],
+        score_fondamental_reel=detail["score_fondamental_reel"],
+        causal_effect=causal["effet"] if causal else None,
+        causal_confidence=causal["confiance"] if causal else None,
+        news_tonalite=news_tonalite,
+        news_importance=news_importance,
+    )
+
+
+def _dominant_direction(direction):
+    """'hausse' | 'stagnation' | 'baisse' -- whichever of the three is
+    largest (ties broken toward stagnation, the conservative read)."""
+    h, s, b = direction["hausse"], direction["stagnation"], direction["baisse"]
+    if h > s and h > b:
+        return "hausse"
+    if b > s and b > h:
+        return "baisse"
+    return "stagnation"
+
+
+def _build_divergence_note(direction_general, direction_with_news):
+    """None if there's nothing worth flagging (either direction is
+    unavailable, or both agree on which way the evidence leans); otherwise
+    a factual, already-computed data line for the prompt to relay -- the
+    LLM never invents or judges the divergence itself, it only explains a
+    real one this module already detected (see SYSTEM_PROMPT_NARRATIVE's
+    own instruction to never leave two contradicting numbers unexplained)."""
+    if not direction_general or not direction_with_news:
+        return None
+    dom_general = _dominant_direction(direction_general)
+    dom_news = _dominant_direction(direction_with_news)
+    if dom_general == dom_news:
+        return None
+    return (
+        f"Divergence detectee entre le signal general de ce ticker et cette "
+        f"news specifique -- explique-la explicitement dans le texte (voir "
+        f"consigne du systeme a ce sujet). Hors cette news, le signal "
+        f"technique/valorisation/causal general penche plutot vers "
+        f"'{dom_general}' ({HORIZON_BASE}) : hausse {direction_general['hausse']}% / "
+        f"stagnation {direction_general['stagnation']}% / baisse {direction_general['baisse']}%. "
+        f"En tenant compte de cette news specifique, la lecture devient "
+        f"'{dom_news}' ({HORIZON_NEWS}) : hausse {direction_with_news['hausse']}% / "
+        f"stagnation {direction_with_news['stagnation']}% / baisse {direction_with_news['baisse']}%."
+    )
+
+
+def generate_news_narrative(client, conn, row):
+    relations = load_relations(conn)
+    graph = build_graph(relations)
+    related = direct_relations(relations, row["ticker"]) if graph.has_node(row["ticker"]) else None
+
+    direction_general = _build_direction_for_news(conn, row["ticker"])
+    direction = _build_direction_for_news(
+        conn, row["ticker"],
+        news_tonalite=row["tonalite"], news_importance=row["importance"],
+    )
+    divergence_note = _build_divergence_note(direction_general, direction)
+
+    prompt = build_news_narrative_prompt(row, related, direction, divergence_note)
+    completion = client.chat.completions.create(
+        model=GROQ_MODEL,
+        temperature=0.4,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT_NARRATIVE},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    text = completion.choices[0].message.content
+    return (text.strip() if text else None), direction
+
+
+def load_cached_narrative(conn, news_id):
+    row = conn.execute(
+        "SELECT texte, direction_hausse, direction_stagnation, direction_baisse, "
+        "direction_horizon, direction_explication FROM news_narratives WHERE news_id = ?",
+        (news_id,),
+    ).fetchone()
+    if not row:
+        return None
+    texte, hausse, stagnation, baisse, horizon, explication = row
+    direction = (
+        {
+            "hausse": hausse, "stagnation": stagnation, "baisse": baisse,
+            "horizon": horizon, "explication": explication,
+        }
+        if hausse is not None else None
+    )
+    return {"texte": texte, "direction_probabilities": direction}
+
+
+def save_narrative(conn, news_id, texte, direction, model):
+    conn.execute(
+        "INSERT INTO news_narratives "
+        "(news_id, texte, direction_hausse, direction_stagnation, direction_baisse, "
+        "direction_horizon, direction_explication, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(news_id) DO UPDATE SET texte = excluded.texte, "
+        "direction_hausse = excluded.direction_hausse, "
+        "direction_stagnation = excluded.direction_stagnation, "
+        "direction_baisse = excluded.direction_baisse, "
+        "direction_horizon = excluded.direction_horizon, "
+        "direction_explication = excluded.direction_explication, "
+        "model = excluded.model",
+        (
+            news_id, texte,
+            direction["hausse"] if direction else None,
+            direction["stagnation"] if direction else None,
+            direction["baisse"] if direction else None,
+            direction["horizon"] if direction else None,
+            direction["explication"] if direction else None,
+            model,
+        ),
+    )
+    conn.commit()
+
+
+def get_or_generate_news_narrative(conn, news_id):
+    """(found, result) -- found=False means this news_id has no
+    news_analysis row at all (caller should 404). result is
+    {"news_id", "texte", "direction_probabilities", "source"} with source
+    one of "cache" | "generated" | "unavailable" (quota exhausted, no API
+    key, or a network error -- never raises for those, same graceful-
+    degradation convention as daily_summary.py's get_or_generate_argued_text)."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT n.id AS news_id, n.ticker, n.title, n.summary_brut, "
+        "a.company, a.sector, a.importance, a.tonalite, a.impact, a.horizon "
+        "FROM news_analysis a JOIN news_raw n ON n.id = a.news_id WHERE n.id = ?",
+        (news_id,),
+    ).fetchone()
+    if row is None:
+        return False, None
+
+    try:
+        conn.execute(CREATE_NARRATIVES_SQL)
+        conn.execute(CREATE_USAGE_NARRATIVE_SQL)
+        conn.commit()
+        _ensure_narratives_horizon_column(conn)
+    except sqlite3.Error as exc:
+        logger.warning("Table news_narratives indisponible (%s).", exc)
+        return True, {"news_id": news_id, "texte": None,
+                      "direction_probabilities": None, "source": "unavailable"}
+
+    cached = load_cached_narrative(conn, news_id)
+    if cached:
+        return True, {"news_id": news_id, **cached, "source": "cache"}
+
+    # Same pytest guard as daily_summary.py's add_argued_texts: never burn
+    # real Groq quota / require network access from a test run.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True, {"news_id": news_id, "texte": None,
+                      "direction_probabilities": None, "source": "unavailable"}
+
+    today = date.today().isoformat()
+    used = get_usage(conn, today, table="llm_usage_news_narrative")
+    if used >= NEWS_NARRATIVE_DAILY_LIMIT:
+        logger.info("Quota narrative news (%d/jour) deja atteint.", NEWS_NARRATIVE_DAILY_LIMIT)
+        return True, {"news_id": news_id, "texte": None,
+                      "direction_probabilities": None, "source": "unavailable"}
+
+    from dotenv import load_dotenv
+    load_dotenv()
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return True, {"news_id": news_id, "texte": None,
+                      "direction_probabilities": None, "source": "unavailable"}
+
+    try:
+        import httpx
+        from groq import Groq
+        http_client = httpx.Client(verify=CA_BUNDLE) if CA_BUNDLE else None
+        client = Groq(api_key=api_key, http_client=http_client)
+        text, direction = generate_news_narrative(client, conn, row)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("news_id=%s: generation narrative echouee (%s).", news_id, exc)
+        return True, {"news_id": news_id, "texte": None,
+                      "direction_probabilities": None, "source": "unavailable"}
+
+    if not text:
+        return True, {"news_id": news_id, "texte": None,
+                      "direction_probabilities": None, "source": "unavailable"}
+
+    save_narrative(conn, news_id, text, direction, GROQ_MODEL)
+    bump_usage(conn, today, table="llm_usage_news_narrative")
+    return True, {"news_id": news_id, "texte": text,
+                  "direction_probabilities": direction, "source": "generated"}
 
 
 # --- Orchestration ---------------------------------------------------------

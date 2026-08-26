@@ -10,11 +10,12 @@ precedent (raw floats via dashboard/currency.py's get_rate_to_eur, not the
 Streamlit-only display-string formatter).
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.dependencies import get_db
 from dashboard.currency import get_rate_to_eur
 from reasoning.analyze_news import (
+    get_or_generate_news_narrative,
     load_news,
     news_summary_paragraph,
     price_before_after_news,
@@ -91,6 +92,7 @@ def _price_context(conn, ticker, published_at):
 
 def _news_to_dict(conn, row):
     return {
+        "news_id": row["news_id"],
         "ticker": row["ticker"],
         "title": row["title"],
         "url": row["url"],
@@ -136,3 +138,29 @@ def get_news(
         "limit": limit,
         "offset": offset,
     }
+
+
+@router.get("/{news_id}/narrative")
+def get_news_narrative(news_id: int, conn=Depends(get_db)):
+    """AI-written explanation of ONE news item (what it means, why it
+    matters, impact on the ticker and its Knowledge-Graph-related
+    companies, plus a hausse/stagnation/baisse split) -- generated ON
+    DEMAND, never as part of the list response above (see
+    reasoning/analyze_news.py's get_or_generate_news_narrative for why:
+    the list can page through thousands of items, so eagerly calling Groq
+    for every row would be an uncontrolled cost). A GET here is what
+    actually triggers generation on a cache miss, same convention as
+    GET /api/daily-summary/{ticker}/argued-text -- the frontend calls this
+    only when a user explicitly opens one news item's enriched view.
+
+    Never a 5xx for a normal degraded state (dedicated quota exhausted, no
+    API key, network error): source="unavailable" with texte=None
+    distinguishes it from a real generation. 404 only when this news_id has
+    no news_analysis row at all (never analysed, or doesn't exist)."""
+    found, result = get_or_generate_news_narrative(conn, news_id)
+    if not found:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Aucune news analysee avec l'id {news_id}.",
+        )
+    return result

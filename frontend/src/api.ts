@@ -5,6 +5,7 @@ import type {
   CompanyDescriptionResponse,
   CausalReasoningRunStats,
   CausalReasoningStatus,
+  NewsNarrativeResponse,
   NewsResponse,
   CorrelationsResponse,
   DailySummaryResponse,
@@ -198,4 +199,10 @@ export function fetchNews(limit = 50, offset = 0, ticker?: string): Promise<News
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
   if (ticker && ticker.trim()) params.set('ticker', ticker.trim())
   return getJson<NewsResponse>(`/news?${params.toString()}`)
+}
+
+// On-demand only (see api/routers/news.py's own docstring) -- never called
+// for a whole list page, only when a user opens one news item's enriched view.
+export function fetchNewsNarrative(newsId: number): Promise<NewsNarrativeResponse> {
+  return getJson<NewsNarrativeResponse>(`/news/${newsId}/narrative`)
 }

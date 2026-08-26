@@ -359,6 +359,7 @@ export interface NewsPriceContext {
 }
 
 export interface NewsItem {
+  news_id: number
   ticker: string
   title: string
   url: string | null
@@ -381,4 +382,14 @@ export interface NewsResponse {
   ticker: string | null
   limit: number
   offset: number
+}
+
+// Mirrors api/routers/news.py's GET /api/news/{news_id}/narrative exactly.
+export type NewsNarrativeSource = 'cache' | 'generated' | 'unavailable'
+
+export interface NewsNarrativeResponse {
+  news_id: number
+  texte: string | null
+  direction_probabilities: DirectionProbabilities | null
+  source: NewsNarrativeSource
 }
