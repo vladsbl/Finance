@@ -15,6 +15,23 @@ export interface PriceInfo {
   variations: PriceVariations
 }
 
+// Mirrors reasoning/direction_probability.py's compute_direction_probabilities()
+// exactly -- hausse + stagnation + baisse always sum to 100. Never a
+// statistical forecast; `disclaimer` must be shown alongside these
+// percentages wherever they're displayed (see the module's own docstring).
+export interface DirectionProbabilities {
+  hausse: number
+  stagnation: number
+  baisse: number
+  // Optional: absent on a small number of pre-existing cached news
+  // narratives generated before this field existed (see
+  // reasoning/analyze_news.py's _ensure_narratives_horizon_column) --
+  // every freshly computed result always has it.
+  horizon?: string | null
+  explication: string
+  disclaimer: string
+}
+
 export interface Signal {
   ticker: string
   nom_affiche: string
@@ -32,6 +49,7 @@ export interface Signal {
   horizon: string
   entreprises_a_surveiller: Record<string, string[]> | null
   prix: PriceInfo | null
+  direction_probabilities: DirectionProbabilities | null
 }
 
 export interface DailySummaryResponse {
@@ -110,6 +128,7 @@ export interface StockDetail {
   score_fondamental_reel: number | null
   sector: string | null
   industry: string | null
+  direction_probabilities: DirectionProbabilities | null
 }
 
 export interface StockChartPoint {

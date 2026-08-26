@@ -19,6 +19,10 @@ from reasoning.daily_summary import (
     load_price_chart_series,
     load_ticker_detail,
 )
+from reasoning.direction_probability import (
+    compute_direction_probabilities,
+    load_causal_effect_for_ticker,
+)
 
 router = APIRouter(prefix="/api/stock", tags=["stock"])
 
@@ -81,6 +85,15 @@ def get_stock_detail(ticker: str, conn=Depends(get_db)):
 
     sector, industry = _sector_row(conn, ticker)
 
+    causal = load_causal_effect_for_ticker(conn, ticker)
+    direction = compute_direction_probabilities(
+        score_technique=detail["technical_score"],
+        score_prix_valorisation=detail["price_valuation_score"],
+        score_fondamental_reel=detail["score_fondamental_reel"],
+        causal_effect=causal["effet"] if causal else None,
+        causal_confidence=causal["confiance"] if causal else None,
+    )
+
     return {
         "ticker": detail["ticker"],
         "nom_affiche": detail["nom_affiche"],
@@ -104,6 +117,7 @@ def get_stock_detail(ticker: str, conn=Depends(get_db)):
         "score_fondamental_reel": detail["score_fondamental_reel"],
         "sector": sector,
         "industry": industry,
+        "direction_probabilities": direction,
     }
 
 

@@ -51,7 +51,7 @@ def test_daily_summary_signal_shape_matches_build_signal():
         "score_prix_valorisation", "score_technique", "score_news",
         "score_fondamental_reel", "explication", "risque",
         "conflit_composantes", "volatilite", "horizon",
-        "entreprises_a_surveiller", "prix",
+        "entreprises_a_surveiller", "prix", "direction_probabilities",
     }
     assert set(signals[0].keys()) == expected_keys
 
@@ -216,7 +216,7 @@ def test_stock_detail_full_data_ticker():
         "prix_eur", "variations", "ma_50", "ma_200", "volume", "volatility",
         "rsi", "rsi_is_real", "price_valuation_score", "technical_score",
         "volatility_score", "volume_score", "final_score", "confidence",
-        "score_fondamental_reel", "sector", "industry",
+        "score_fondamental_reel", "sector", "industry", "direction_probabilities",
     }
     assert set(body.keys()) == expected_keys
     assert body["ticker"] == "AAPL"

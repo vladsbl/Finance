@@ -58,9 +58,11 @@ Argued text (LLM)
 On top of the structured data above, each retained signal gets a short
 written paragraph from Groq (same model/retry/backoff pattern as
 reasoning/analyze_news.py) explaining WHY it matters today, grounded strictly
-in the data already computed (never invents facts). Capped at
-DAILY_LLM_CALL_LIMIT calls/day (its own counter, `llm_usage_summary`, kept
-separate from analyze_news.py's `llm_usage` so the two quotas never interfere).
+in the data already computed (never invents facts), including a
+hausse/stagnation/baisse direction estimate (see
+reasoning/direction_probability.py). Capped at DAILY_LLM_CALL_LIMIT
+calls/day (its own counter, `llm_usage_summary`, kept separate from
+analyze_news.py's `llm_usage` so the two quotas never interfere).
 Any failure (missing API key, network error, rate limit exhaustion) is
 swallowed: the signal simply keeps its structured presentation, never a crash.
 
@@ -92,6 +94,10 @@ if REPO_ROOT not in sys.path:
 from analysis.combined_score import compute_rsi, proxy_rsi  # noqa: E402
 from analysis.price_valuation_scores_universe import compute_volatility  # noqa: E402
 from graph.build_graph import build_graph, direct_relations, load_relations  # noqa: E402
+from reasoning.direction_probability import (  # noqa: E402
+    compute_direction_probabilities,
+    load_causal_effect_for_ticker,
+)
 
 DB_PATH = os.path.join(REPO_ROOT, "data", "marketdb.db")
 DATA_DIR = os.path.dirname(DB_PATH)
@@ -111,9 +117,12 @@ logger = logging.getLogger("daily_summary")
 
 # --- Configuration -----------------------------------------------------------
 
-TOP_N = 3
+TOP_N = 5
 # Quality gate: a ticker below this confiance is never shown, however high
-# its raw score_global -- fewer, trustworthy signals beat a forced 3rd pick.
+# its raw score_global -- fewer, trustworthy signals beat a forced pick.
+# Unchanged when TOP_N went from 3 to 5: quality still comes before
+# quantity -- a day with only 2 tickers clearing this bar still shows only
+# 2, never a forced 5th pick nobody should act on.
 MIN_CONFIDENCE = 50.0
 
 # Same thresholds as reasoning/opportunity_scoring.py's own component labels.
@@ -633,14 +642,31 @@ from reasoning.groq_config import (  # noqa: E402
 
 # Two SEPARATE daily quota pools, each its own table, so browsing dozens of
 # tickers/day on "Analyse d'une action" (dashboard/app.py) can never block --
-# or be blocked by -- Resume du jour's own 3 signals. Both stay comfortably
-# within Groq's real ceiling (~500-550 analyses/day observed for
-# reasoning/analyze_news.py when it has the account's full daily token
-# budget to itself, tied to the free tier's 200k-tokens/day (TPD) limit
-# for openai/gpt-oss-120b -- was 100k under the now-deprecated
-# llama-3.3-70b-versatile -- not a request-count limit): 3 + 10 = 13
-# combined worst case, nowhere close.
-DAILY_LLM_CALL_LIMIT = 3            # Resume du jour (its TOP_N signals)
+# or be blocked by -- Resume du jour's own TOP_N signals. The real ceiling
+# to watch is the ACCOUNT-WIDE 200k-tokens/day (TPD) limit for
+# openai/gpt-oss-120b (was 100k under the now-deprecated
+# llama-3.3-70b-versatile), shared with reasoning/analyze_news.py (which can
+# alone consume ~190-210k tokens/day on a big backlog, at its own observed
+# ~380 tokens/analysis -- see analyze_news.py's _is_daily_token_limit), not
+# a per-module allowance -- not a request-count limit.
+#
+# Measured for real on 2026-08-25 after the 5-section narrative rewrite
+# (build_argument_prompt/SYSTEM_PROMPT_ARGUMENT below), against the live
+# Groq API, openai/gpt-oss-120b:
+#   - with a causal-chain macro context (richest/most expensive case):
+#     1264 prompt + 928 completion = 2192 tokens/call
+#   - with no macro context (typical case, most tickers most days):
+#     1011 prompt + 681 completion = 1692 tokens/call
+# Call-count limits below were kept unchanged (5/10 -- not reduced): even at
+# the worst-case ~2200 tokens/call, 5 + 10 = 15 combined calls/day is at
+# most ~33k tokens/day for this module alone, a small fraction of the
+# shared 200k TPD budget. On a day analyze_news.py's own backlog is large
+# enough to exhaust the TPD budget by itself, THIS module's calls (whichever
+# ran later) simply degrade gracefully to the structured-only presentation
+# (add_argued_texts never raises) -- the same acceptable trade-off that
+# already existed before this measurement, not a new risk introduced by the
+# longer prompt.
+DAILY_LLM_CALL_LIMIT = 5            # Resume du jour (its TOP_N signals)
 TICKER_ANALYSIS_DAILY_LIMIT = 10    # "Analyse d'une action", any ticker on demand
 
 USAGE_TABLE_SUMMARY = "llm_usage_summary"
@@ -665,41 +691,50 @@ CREATE TABLE IF NOT EXISTS daily_summary_arguments (
 """
 
 SYSTEM_PROMPT_ARGUMENT = (
-    "Tu es un analyste financier qui redige une analyse structuree en "
-    "francais pour expliquer POURQUOI un signal d'investissement merite "
-    "l'attention AUJOURD'HUI. Le lecteur n'est pas trader professionnel : "
-    "reste accessible, sans jargon non explique.\n\n"
+    "Tu es un analyste financier qui redige, en francais, une analyse "
+    "structuree de positionnement MOYEN/LONG TERME (horizon 1 semaine a 1 "
+    "an) pour un lecteur non trader professionnel : reste accessible, sans "
+    "jargon non explique. Interdiction absolue : jamais de day trading, "
+    "jamais de prix d'entree ou de stop-loss precis -- ce n'est pas ce "
+    "registre.\n\n"
     "Regle absolue : reste strictement fidele aux donnees fournies -- "
     "n'invente aucun fait, aucun chiffre, et surtout aucun contexte "
     "macro-economique (taux d'interet, tensions geopolitiques, matieres "
     "premieres, decisions de banque centrale) qui n'apparaisse pas "
     "explicitement ci-dessous. Si aucun contexte macro/causal/news n'est "
-    "fourni, n'en mentionne aucun -- dis-toi que ce ticker n'a simplement "
-    "pas d'actualite macro notable en ce moment, ce n'est pas une lacune a "
-    "combler par toi-meme.\n\n"
-    "Structure attendue, en 3 paragraphes distincts separes par un saut de "
-    "ligne. Longueur IMPERATIVE : 180 mots au total maximum (60 mots par "
-    "paragraphe environ) -- sois dense et va a l'essentiel, ne developpe "
-    "pas au-dela :\n"
-    "1. Situation de l'entreprise : ce que les scores fournis (prix/"
-    "valorisation, technique, fondamental reel, risque) signifient "
-    "concretement pour quelqu'un qui envisage d'investir -- pas une "
-    "enumeration mecanique des chiffres, explique ce qu'ils impliquent. Si "
-    "un prix actuel et une variation recente sont fournis ci-dessous, "
-    "mentionne-les naturellement dans ce paragraphe (jamais un chiffre qui "
-    "n'y figure pas).\n"
-    "2. Contexte macro-economique ou sectoriel -- UNIQUEMENT si une chaine "
-    "causale ou une news importante est fournie ci-dessous ; sinon, limite "
-    "ce paragraphe aux entreprises liees deja fournies (concurrents/"
-    "fournisseurs/clients), sans inventer de contexte macro absent.\n"
-    "3. Synthese : en quoi la combinaison de la situation propre a "
-    "l'entreprise et du contexte (macro s'il existe, sinon sectoriel/"
-    "concurrentiel) rend -- ou ne rend pas clairement -- cette action "
-    "interessante AUJOURD'HUI specifiquement, pas de maniere generale.\n\n"
-    "Style : phrases completes, ton professionnel mais clair, sans "
-    "markdown ni titres de section visibles (les 3 paragraphes suffisent a "
-    "structurer). Reponds uniquement avec le texte de l'analyse, rien "
-    "d'autre."
+    "fourni, n'en mentionne aucun -- ce n'est pas une lacune a combler par "
+    "toi-meme. Les 3 probabilites hausse/stagnation/baisse fournies "
+    "ci-dessous sont deja calculees : reprends-les EXACTEMENT telles "
+    "quelles, ne les recalcule pas et n'en invente pas d'autres.\n\n"
+    "Structure attendue, en 5 sections separees par un saut de ligne "
+    "(pas de titres de section visibles ni de markdown -- le contenu de "
+    "chaque section suffit a la signaler). Longueur IMPERATIVE : 320 mots "
+    "au total maximum -- sois dense, va a l'essentiel :\n"
+    "1. Resume executif : un verdict clair en une phrase, puis les 3 "
+    "probabilites fournies (hausse X% / stagnation Y% / baisse Z%), puis "
+    "l'horizon recommande -- choisis EXACTEMENT un horizon parmi \"1 "
+    "semaine\", \"1 mois\", \"6 mois\" ou \"1 an\", deduit du contexte "
+    "(volatilite, risque, presence ou non d'un contexte macro) -- jamais "
+    "un autre horizon que ces quatre.\n"
+    "2. Contexte macro : UNIQUEMENT si une chaine causale ou une news "
+    "importante est fournie ci-dessous ; sinon, limite-toi aux entreprises "
+    "liees deja fournies (concurrents/fournisseurs/clients), sans inventer "
+    "de contexte macro absent.\n"
+    "3. Situation micro de l'entreprise : traduis les 4 scores fournis "
+    "(prix/valorisation, technique, news, fondamental reel) en langage "
+    "clair -- ce qu'ils signifient concretement, jamais une simple "
+    "enumeration de chiffres. Si un prix actuel et une variation recente "
+    "sont fournis, mentionne-les naturellement ici.\n"
+    "4. Synthese : relie le contexte macro (s'il existe) et la situation "
+    "micro, puis indique EXPLICITEMENT les conditions qui feraient changer "
+    "cet avis (ex: \"ce signal resterait valable tant que le prix reste "
+    "au-dessus de sa moyenne 200 jours\", ou une autre condition concrete "
+    "tiree des donnees fournies).\n"
+    "5. Rappel honnete, en une phrase : ceci est une estimation qualitative "
+    "basee sur des heuristiques, pas une prediction statistique validee ni "
+    "une garantie de mouvement futur.\n\n"
+    "Style : phrases completes, ton professionnel mais clair. Reponds "
+    "uniquement avec le texte de l'analyse, rien d'autre."
 )
 
 
@@ -821,6 +856,16 @@ def build_argument_prompt(signal, macro_context=None, conn=None):
         f"Detail des composantes : {signal['explication']}",
         f"Niveau de risque retenu : {signal['risque']}",
     ]
+    # Already computed by reasoning/direction_probability.py -- given here
+    # as fixed data the LLM must reuse verbatim in its resume executif
+    # (see SYSTEM_PROMPT_ARGUMENT), never recompute or invent its own.
+    direction = signal.get("direction_probabilities")
+    if direction:
+        lines.append(
+            f"Probabilites deja calculees (a reprendre telles quelles) : "
+            f"hausse {direction['hausse']}% / stagnation {direction['stagnation']}% / "
+            f"baisse {direction['baisse']}%. Detail du calcul : {direction['explication']}"
+        )
     # Real price + variation, exactly as computed/shown in the structured
     # metrics -- given here so the LLM can refer to it naturally instead of
     # guessing or omitting it; conn=None (no caller-supplied connection)
@@ -867,7 +912,7 @@ def build_argument_prompt(signal, macro_context=None, conn=None):
         )
 
     lines.append(
-        "\nRedige l'analyse structuree en 3 paragraphes demandee, "
+        "\nRedige l'analyse structuree en 5 sections demandee, "
         "uniquement a partir des elements ci-dessus."
     )
     return "\n".join(lines)
@@ -1094,6 +1139,15 @@ def build_signal(conn, row, graph, relations):
     nom_affiche = load_display_name(conn, row["ticker"])
     prix = compute_price_variation(conn, row["ticker"])
 
+    causal = load_causal_effect_for_ticker(conn, row["ticker"])
+    direction = compute_direction_probabilities(
+        score_technique=row["score_technique"],
+        score_prix_valorisation=row["score_prix_valorisation"],
+        score_fondamental_reel=row["score_fondamental_reel"],
+        causal_effect=causal["effet"] if causal else None,
+        causal_confidence=causal["confiance"] if causal else None,
+    )
+
     return {
         "ticker": row["ticker"],
         "nom_affiche": nom_affiche,
@@ -1111,6 +1165,7 @@ def build_signal(conn, row, graph, relations):
         "horizon": HORIZON_LABEL,
         "entreprises_a_surveiller": watch,
         "prix": prix,
+        "direction_probabilities": direction,
     }
 
 
