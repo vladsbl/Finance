@@ -32,6 +32,18 @@ export interface DirectionProbabilities {
   disclaimer: string
 }
 
+// Mirrors api/routers/stock.py's GET /api/stock/{ticker}/description
+// exactly. Unlike ArguedTextResponse, this has no per-day freshness
+// concept -- see reasoning/company_description.py's own docstring for why
+// a company description is cached permanently instead.
+export type CompanyDescriptionSource = 'cache' | 'generated' | 'unavailable'
+
+export interface CompanyDescriptionResponse {
+  ticker: string
+  description: string | null
+  source: CompanyDescriptionSource
+}
+
 export interface Signal {
   ticker: string
   nom_affiche: string

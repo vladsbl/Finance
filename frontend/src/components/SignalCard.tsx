@@ -1,5 +1,9 @@
 import { useState } from 'react'
 import { ApiError, fetchArguedText } from '../api'
+import { CompanyDescription } from './CompanyDescription'
+import { DirectionProbabilityBar } from './DirectionProbabilityBar'
+import { ExpandModal } from './ExpandModal'
+import { PriceHeadline } from './PriceHeadline'
 import type { Signal } from '../types'
 
 const RISK_STYLES: Record<string, string> = {
@@ -29,6 +33,7 @@ type ArguedTextState =
 
 export function SignalCard({ signal }: { signal: Signal }) {
   const [arguedText, setArguedText] = useState<ArguedTextState>({ status: 'idle' })
+  const [expanded, setExpanded] = useState(false)
 
   async function handleLoadArguedText() {
     setArguedText({ status: 'loading' })
@@ -47,33 +52,54 @@ export function SignalCard({ signal }: { signal: Signal }) {
         <h3 className="text-lg font-semibold text-gray-900">
           {signal.ticker} <span className="font-normal text-gray-500">-- {signal.nom_affiche}</span>
         </h3>
-        <span className={`rounded-full px-3 py-1 text-sm font-medium ${riskBadgeClass(signal.risque)}`}>
-          Risque : {signal.risque}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className={`rounded-full px-3 py-1 text-sm font-medium ${riskBadgeClass(signal.risque)}`}>
+            Risque : {signal.risque}
+          </span>
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-600 hover:bg-gray-50"
+          >
+            Detail complet
+          </button>
+        </div>
       </div>
 
-      <div className="mt-3 flex flex-wrap gap-6 text-sm">
+      <div className="mt-2">
+        <CompanyDescription ticker={signal.ticker} />
+      </div>
+
+      {/* Price first, big and coloured -- ahead of every other score. */}
+      {signal.prix && (
+        <div className="mt-3">
+          <PriceHeadline
+            price={signal.prix.prix_actuel}
+            currency={signal.prix.devise}
+            variationPct={signal.prix.variations['1j']}
+          />
+          <p className="mt-1 text-xs text-gray-500">
+            7j: {formatVariation(signal.prix.variations['7j'])} - 30j:{' '}
+            {formatVariation(signal.prix.variations['30j'])}
+          </p>
+        </div>
+      )}
+
+      {/* Direction probabilities -- THE main forward-looking number now. */}
+      <div className="mt-3">
+        <DirectionProbabilityBar direction={signal.direction_probabilities} />
+      </div>
+
+      {/* Secondary scores -- smaller, below the price and the probabilities. */}
+      <div className="mt-3 flex flex-wrap gap-6 text-xs">
         <div>
           <span className="text-gray-500">Score ajuste</span>
-          <p className="text-xl font-semibold text-gray-900">{signal.score_ajuste.toFixed(1)}</p>
+          <p className="text-sm font-semibold text-gray-900">{signal.score_ajuste.toFixed(1)}</p>
         </div>
         <div>
           <span className="text-gray-500">Confiance</span>
-          <p className="text-xl font-semibold text-gray-900">{signal.confiance.toFixed(0)}%</p>
+          <p className="text-sm font-semibold text-gray-900">{signal.confiance.toFixed(0)}%</p>
         </div>
-        {signal.prix && (
-          <div>
-            <span className="text-gray-500">Prix actuel</span>
-            <p className="text-xl font-semibold text-gray-900">
-              {signal.prix.prix_actuel.toFixed(2)} {signal.prix.devise}
-            </p>
-            <p className="text-xs text-gray-500">
-              1j: {formatVariation(signal.prix.variations['1j'])} - 7j:{' '}
-              {formatVariation(signal.prix.variations['7j'])} - 30j:{' '}
-              {formatVariation(signal.prix.variations['30j'])}
-            </p>
-          </div>
-        )}
       </div>
 
       <p className="mt-3 text-sm text-gray-700">{signal.explication}</p>
@@ -136,6 +162,97 @@ export function SignalCard({ signal }: { signal: Signal }) {
           </p>
         )}
       </div>
+
+      <ExpandModal
+        isOpen={expanded}
+        onClose={() => setExpanded(false)}
+        title={`${signal.ticker} -- ${signal.nom_affiche}`}
+      >
+        <SignalDetail signal={signal} />
+      </ExpandModal>
+    </div>
+  )
+}
+
+function ScoreCell({ label, value }: { label: string; value: number | null }) {
+  return (
+    <div className="rounded-md bg-gray-50 p-3">
+      <p className="text-xs text-gray-500">{label}</p>
+      <p className="text-lg font-semibold text-gray-900">{value !== null ? value.toFixed(0) : 'n/a'}</p>
+    </div>
+  )
+}
+
+// The compact SignalCard only ever shows score_ajuste + confiance + prix --
+// the four component scores and entreprises_a_surveiller (both already in
+// the Signal payload) have nowhere to live inline without cluttering every
+// card, so the expanded view is where they actually become visible.
+function SignalDetail({ signal }: { signal: Signal }) {
+  const watchEntries = signal.entreprises_a_surveiller
+    ? Object.entries(signal.entreprises_a_surveiller).filter(([, tickers]) => tickers.length > 0)
+    : []
+
+  return (
+    <div className="flex flex-col gap-5">
+      <CompanyDescription ticker={signal.ticker} />
+
+      {signal.prix && (
+        <div>
+          <PriceHeadline
+            price={signal.prix.prix_actuel}
+            currency={signal.prix.devise}
+            variationPct={signal.prix.variations['1j']}
+          />
+          <p className="mt-1 text-xs text-gray-500">
+            7j: {formatVariation(signal.prix.variations['7j'])} - 30j:{' '}
+            {formatVariation(signal.prix.variations['30j'])}
+          </p>
+        </div>
+      )}
+
+      <DirectionProbabilityBar direction={signal.direction_probabilities} />
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <ScoreCell label="Score global" value={signal.score_global} />
+        <ScoreCell label="Score ajuste" value={signal.score_ajuste} />
+        <ScoreCell label="Confiance" value={signal.confiance} />
+        <ScoreCell label="Volatilite" value={signal.volatilite} />
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900">Composantes du score</h3>
+        <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <ScoreCell label="Prix / Valorisation" value={signal.score_prix_valorisation} />
+          <ScoreCell label="Technique" value={signal.score_technique} />
+          <ScoreCell label="News" value={signal.score_news} />
+          <ScoreCell label="Fondamental reel" value={signal.score_fondamental_reel} />
+        </div>
+        {signal.conflit_composantes && (
+          <p className="mt-2 text-xs font-medium text-amber-700">
+            Contradiction detectee entre les composantes structurelles.
+          </p>
+        )}
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900">Explication</h3>
+        <p className="mt-1 text-sm text-gray-700">{signal.explication}</p>
+        <p className="mt-1 text-xs text-gray-400">{signal.horizon}</p>
+      </div>
+
+      {watchEntries.length > 0 && (
+        <div>
+          <h3 className="text-sm font-semibold text-gray-900">Entreprises a surveiller</h3>
+          <ul className="mt-2 flex flex-col gap-1.5 text-sm">
+            {watchEntries.map(([relation, watchTickers]) => (
+              <li key={relation}>
+                <span className="font-medium text-gray-700">{relation}</span>
+                <span className="text-gray-500"> : {watchTickers.join(', ')}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }

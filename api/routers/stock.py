@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.dependencies import get_db, get_or_generate_argued_text, normalise_ticker
 from dashboard.currency import get_rate_to_eur
+from reasoning.company_description import get_or_generate_company_description
 from reasoning.daily_summary import (
     compute_price_variation,
     load_all_tickers_with_names,
@@ -141,6 +142,31 @@ def get_stock_argued_text(ticker: str, conn=Depends(get_db)):
                 "`python reasoning/opportunity_scoring.py --priorite toutes` "
                 "pour l'inclure."
             ),
+        )
+    return result
+
+
+@router.get("/{ticker}/description")
+def get_company_description(ticker: str, conn=Depends(get_db)):
+    """Short French company description -- see
+    reasoning/company_description.py's own docstring for why this is the
+    ONE piece of generated content in the whole pipeline with a PERMANENT
+    cache (no day component: what a company does does not go stale).
+
+    A GET here triggers generation on a cache miss, same on-demand
+    convention as GET /api/stock/{ticker}/argued-text -- but unlike that
+    route, a successful generation here is NEVER repeated for this ticker
+    again. Never a 5xx for a normal degraded state (dedicated quota
+    exhausted, no API key, network error): source="unavailable" with
+    description=None distinguishes it from a real generation. 404 only if
+    the ticker isn't in `universe` at all."""
+    ticker = normalise_ticker(ticker)
+
+    found, result = get_or_generate_company_description(conn, ticker)
+    if not found:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{ticker} n'est pas dans l'univers suivi.",
         )
     return result
 

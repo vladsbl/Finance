@@ -3,15 +3,26 @@ import {
   ApiError,
   fetchCausalChains,
   fetchCausalReasoningStatus,
+  fetchStockDetail,
   runCausalReasoning,
 } from '../api'
+import { CompanyDescription } from '../components/CompanyDescription'
+import { DirectionProbabilityBar } from '../components/DirectionProbabilityBar'
+import { ExpandModal } from '../components/ExpandModal'
+import { PriceHeadline } from '../components/PriceHeadline'
 import type {
   CausalChain,
   CausalChainsResponse,
   CausalReasoningRunStats,
   CausalReasoningStatus,
   EffetImpact,
+  StockDetail,
 } from '../types'
+
+type StockDetailState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; data: StockDetail }
 
 type ChainsState =
   | { status: 'loading' }
@@ -237,17 +248,44 @@ export function CausalReasoningPage() {
 
 function ChainCard({ chain }: { chain: CausalChain }) {
   const chainDate = (chain.created_at || '').slice(0, 10)
+  const [expanded, setExpanded] = useState(false)
+  const [stockState, setStockState] = useState<StockDetailState>({ status: 'loading' })
+
+  useEffect(() => {
+    if (!expanded) return
+    setStockState({ status: 'loading' })
+    fetchStockDetail(chain.ticker_source)
+      .then((data) => setStockState({ status: 'ready', data }))
+      .catch((err) => {
+        const message = err instanceof ApiError ? err.message : "Erreur inattendue lors du chargement de l'action."
+        setStockState({ status: 'error', message })
+      })
+  }, [expanded, chain.ticker_source])
+
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-lg font-semibold text-gray-900">
           {chain.ticker_source} <span className="font-normal text-gray-500">-- {chainDate}</span>
         </h3>
-        {chain.confiance !== null && (
-          <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700">
-            Confiance : {chain.confiance.toFixed(0)}%
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {chain.confiance !== null && (
+            <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700">
+              Confiance : {chain.confiance.toFixed(0)}%
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-600 hover:bg-gray-50"
+          >
+            Agrandir
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-2">
+        <CompanyDescription ticker={chain.ticker_source} />
       </div>
 
       <p className="mt-1 text-xs text-gray-500">
@@ -272,6 +310,78 @@ function ChainCard({ chain }: { chain: CausalChain }) {
       )}
 
       {chain.model && <p className="mt-3 text-xs text-gray-400">Modele : {chain.model}</p>}
+
+      <ExpandModal
+        isOpen={expanded}
+        onClose={() => setExpanded(false)}
+        title={`${chain.ticker_source} -- chaine causale du ${chainDate}`}
+      >
+        <div className="flex flex-col gap-5">
+          <CompanyDescription ticker={chain.ticker_source} />
+
+          <p className="whitespace-pre-line text-base text-gray-800">{chain.chaine_raisonnement}</p>
+
+          {chain.entreprises_impactees.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">Entreprises impactees</h3>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {chain.entreprises_impactees.map((entry, i) => (
+                  <span
+                    key={i}
+                    className={`rounded-full px-2.5 py-1 text-xs font-medium ${effetStyle(entry.effet)}`}
+                  >
+                    {entry.entreprise}
+                    {entry.ticker ? ` (${entry.ticker})` : ''} -- {entry.effet}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">
+              Contexte actuel de {chain.ticker_source}
+            </h3>
+            {stockState.status === 'loading' && (
+              <p className="mt-1 text-sm text-gray-500">Chargement...</p>
+            )}
+            {stockState.status === 'error' && (
+              <p className="mt-1 text-sm text-red-600">{stockState.message}</p>
+            )}
+            {stockState.status === 'ready' && (
+              <div className="mt-2">
+                <PriceHeadline
+                  price={stockState.data.prix_eur !== null ? stockState.data.prix_eur : stockState.data.current_price}
+                  currency={stockState.data.prix_eur !== null ? 'EUR' : stockState.data.devise}
+                  variationPct={stockState.data.variations ? stockState.data.variations['1j'] : null}
+                />
+                <div className="mt-3">
+                  <DirectionProbabilityBar direction={stockState.data.direction_probabilities} />
+                </div>
+                <div className="mt-3 flex gap-6 text-xs">
+                  <div>
+                    <span className="text-gray-500">Score final</span>
+                    <p className="text-sm font-semibold text-gray-900">
+                      {stockState.data.final_score !== null ? stockState.data.final_score.toFixed(0) : 'n/a'}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Confiance</span>
+                    <p className="text-sm font-semibold text-gray-900">
+                      {stockState.data.confidence !== null ? `${stockState.data.confidence.toFixed(0)}%` : 'n/a'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {chain.news_title && (
+            <p className="text-xs text-gray-500">News d'origine : {chain.news_title}</p>
+          )}
+          {chain.model && <p className="text-xs text-gray-400">Modele : {chain.model}</p>}
+        </div>
+      </ExpandModal>
     </div>
   )
 }

@@ -16,6 +16,9 @@ import {
   fetchStockDetail,
   fetchTickers,
 } from '../api'
+import { CompanyDescription } from '../components/CompanyDescription'
+import { DirectionProbabilityBar } from '../components/DirectionProbabilityBar'
+import { PriceHeadline } from '../components/PriceHeadline'
 import { TickerSearch } from '../components/TickerSearch'
 import type {
   ArguedTextSource,
@@ -219,40 +222,37 @@ function StockDetailView({
           </p>
         )}
 
-        <div className="mt-4 flex flex-wrap gap-6 text-sm">
-          <div>
-            <span className="text-gray-500">Prix actuel</span>
-            <p className="text-xl font-semibold text-gray-900">
-              {detail.prix_eur !== null
-                ? `${detail.prix_eur.toFixed(2)} EUR`
-                : `${fmt(detail.current_price, 2)} ${detail.devise}`}
-            </p>
-            {detail.variations && (
-              <p className="text-xs text-gray-500">
-                1j: {fmtVariation(detail.variations['1j'])} - 7j:{' '}
-                {fmtVariation(detail.variations['7j'])} - 30j:{' '}
-                {fmtVariation(detail.variations['30j'])}
-              </p>
-            )}
-          </div>
-          <div>
-            <span className="text-gray-500">Confiance</span>
-            <p className="text-xl font-semibold text-gray-900">
-              {detail.confidence !== null ? `${detail.confidence.toFixed(0)}%` : 'n/a'}
-            </p>
-          </div>
-          <div>
-            <span className="text-gray-500">RSI</span>
-            <p className="text-xl font-semibold text-gray-900">
-              {fmt(detail.rsi)}
-              {detail.rsi !== null && !detail.rsi_is_real && (
-                <span className="ml-1 text-xs font-normal text-gray-400">(estime)</span>
-              )}
-            </p>
-          </div>
+        <div className="mt-2">
+          <CompanyDescription ticker={detail.ticker} />
         </div>
 
-        <div className="mt-4 grid grid-cols-2 gap-4 border-t border-gray-100 pt-4 text-sm sm:grid-cols-4">
+        {/* Price first, big and coloured -- the single most immediately
+            useful number on this page, ahead of every other score. */}
+        <div className="mt-4">
+          <PriceHeadline
+            price={detail.prix_eur !== null ? detail.prix_eur : detail.current_price}
+            currency={detail.prix_eur !== null ? 'EUR' : detail.devise}
+            variationPct={detail.variations ? detail.variations['1j'] : null}
+          />
+          {detail.variations && (
+            <p className="mt-1 text-xs text-gray-500">
+              7j: {fmtVariation(detail.variations['7j'])} - 30j:{' '}
+              {fmtVariation(detail.variations['30j'])}
+            </p>
+          )}
+        </div>
+
+        {/* Direction probabilities -- THE main forward-looking number now,
+            ahead of the older secondary scores below. */}
+        <div className="mt-4 border-t border-gray-100 pt-4">
+          <DirectionProbabilityBar direction={detail.direction_probabilities} />
+        </div>
+
+        {/* Secondary scores -- smaller, below the price and the direction
+            probabilities, kept for anyone who wants the structured detail. */}
+        <div className="mt-4 grid grid-cols-2 gap-3 border-t border-gray-100 pt-4 text-xs sm:grid-cols-4">
+          <ScoreStat label="Confiance" value={detail.confidence} />
+          <ScoreStat label="RSI" value={detail.rsi} suffix={detail.rsi !== null && !detail.rsi_is_real ? ' (estime)' : ''} />
           <ScoreStat label="Prix / Valorisation" value={detail.price_valuation_score} />
           <ScoreStat label="Technique" value={detail.technical_score} />
           <ScoreStat label="Fondamental reel" value={detail.score_fondamental_reel} />
@@ -330,15 +330,20 @@ function ScoreStat({
   label,
   value,
   decimals = 1,
+  suffix = '',
 }: {
   label: string
   value: number | null
   decimals?: number
+  suffix?: string
 }) {
   return (
     <div>
       <span className="text-gray-500">{label}</span>
-      <p className="font-semibold text-gray-900">{fmt(value, decimals)}</p>
+      <p className="text-sm font-semibold text-gray-900">
+        {fmt(value, decimals)}
+        {suffix}
+      </p>
     </div>
   )
 }

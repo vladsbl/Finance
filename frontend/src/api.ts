@@ -2,6 +2,7 @@ import type {
   AddRelationPayload,
   ArguedTextResponse,
   CausalChainsResponse,
+  CompanyDescriptionResponse,
   CausalReasoningRunStats,
   CausalReasoningStatus,
   NewsResponse,
@@ -118,6 +119,13 @@ export function fetchStockChart(ticker: string): Promise<StockChartResponse> {
 
 export function fetchStockArguedText(ticker: string): Promise<ArguedTextResponse> {
   return getJson<ArguedTextResponse>(`/stock/${encodeURIComponent(ticker)}/argued-text`)
+}
+
+// Permanently cached server-side (see reasoning/company_description.py) --
+// safe to call every time a ticker's detail is shown, a second call for
+// the same ticker only ever reads the cache, never regenerates.
+export function fetchCompanyDescription(ticker: string): Promise<CompanyDescriptionResponse> {
+  return getJson<CompanyDescriptionResponse>(`/stock/${encodeURIComponent(ticker)}/description`)
 }
 
 // --- /api/graph -------------------------------------------------------------

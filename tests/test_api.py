@@ -276,6 +276,38 @@ def test_stock_chart_unknown_ticker_returns_404():
     assert resp.status_code == 404
 
 
+def test_company_description_unknown_ticker_returns_404():
+    resp = client.get("/api/stock/NOTATICKER123/description")
+    assert resp.status_code == 404
+    assert "NOTATICKER123" in resp.json()["detail"]
+
+
+def test_company_description_never_calls_groq_during_tests():
+    """Same PYTEST_CURRENT_TEST guard as the argued-text/narrative
+    equivalents -- get_or_generate_company_description must never reach
+    Groq during a pytest run."""
+    resp = client.get("/api/stock/AAPL/description")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"ticker", "description", "source"}
+    assert body["ticker"] == "AAPL"
+    assert body["source"] in {"cache", "unavailable"}
+    if body["source"] == "unavailable":
+        assert body["description"] is None
+    else:
+        assert isinstance(body["description"], str) and body["description"]
+
+
+def test_company_description_is_cached_across_repeated_calls():
+    """Unlike argued-text/narrative, this cache has NO day component -- two
+    calls in the same test run must return the exact same result (either
+    both "cache" with identical text, or both "unavailable" -- never a
+    fresh "generated" the second time)."""
+    first = client.get("/api/stock/AAPL/description").json()
+    second = client.get("/api/stock/AAPL/description").json()
+    assert first == second
+
+
 def test_stock_argued_text_unknown_ticker_returns_404():
     resp = client.get("/api/stock/NOTATICKER123/argued-text")
     assert resp.status_code == 404

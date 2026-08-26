@@ -10,7 +10,10 @@ import {
   YAxis,
 } from 'recharts'
 import { ApiError, fetchCorrelations, fetchStockChart, fetchStockDetail } from '../api'
+import { CompanyDescription } from '../components/CompanyDescription'
+import { DirectionProbabilityBar } from '../components/DirectionProbabilityBar'
 import { ExpandModal } from '../components/ExpandModal'
+import { PriceHeadline } from '../components/PriceHeadline'
 import type { Correlation, CorrelationBadge, CorrelationsResponse, StockDetail } from '../types'
 
 type CorrState =
@@ -50,6 +53,31 @@ function formatCoefficient(coef: number): string {
 
 function formatPValue(p: number): string {
   return p.toExponential(2)
+}
+
+// relation_type comes straight off the Knowledge Graph (concurrent /
+// fournisseur / client / partenaire / dependance -- same vocabulary as
+// AddRelationForm's own dropdown on the Knowledge Graph page), read as
+// "source -- relation_type --> target" everywhere else it's shown (e.g.
+// ManualRelationsPanel). Turned into one plain-French sentence here so the
+// relation is legible at a glance instead of a bare English/technical
+// label.
+function describeRelation(correlation: Correlation): string {
+  const { nom_source, nom_target, relation_type } = correlation
+  switch (relation_type) {
+    case 'concurrent':
+      return 'Ces deux entreprises sont concurrentes.'
+    case 'partenaire':
+      return 'Ces deux entreprises sont partenaires.'
+    case 'fournisseur':
+      return `${nom_source} est fournisseur de ${nom_target}.`
+    case 'client':
+      return `${nom_source} est client de ${nom_target}.`
+    case 'dependance':
+      return `${nom_source} depend de ${nom_target}.`
+    default:
+      return `Relation detectee entre ces deux entreprises : ${relation_type}.`
+  }
 }
 
 function BadgePill({ badge }: { badge: Correlation['badge'] }) {
@@ -410,6 +438,12 @@ function CorrelationComparison({ correlation }: { correlation: Correlation }) {
 
   return (
     <div className="flex flex-col gap-6">
+      {/* The relation type, plain-French and up front -- readable at a
+          glance instead of buried in the table's raw relation_type column. */}
+      <p className="rounded-md bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-900">
+        {describeRelation(correlation)}
+      </p>
+
       {/* Correlation metrics, in large -- the reason these two tickers are
           being compared in the first place. */}
       <div className="grid grid-cols-2 gap-4 rounded-md bg-gray-50 p-4 sm:grid-cols-4">
@@ -524,29 +558,21 @@ function CompanyPanel({
 
       {state.status === 'ready' && (
         <div className="mt-2 flex flex-col gap-2 text-sm">
-          {(state.data.sector || state.data.industry) && (
+          <CompanyDescription ticker={ticker} />
+
+          <PriceHeadline
+            price={state.data.prix_eur !== null ? state.data.prix_eur : state.data.current_price}
+            currency={state.data.prix_eur !== null ? 'EUR' : state.data.devise}
+            variationPct={state.data.variations ? state.data.variations['1j'] : null}
+          />
+          {state.data.variations && (
             <p className="text-xs text-gray-500">
-              {[state.data.sector, state.data.industry].filter(Boolean).join(' - ')}
+              7j: {formatVariation(state.data.variations['7j'])} - 30j:{' '}
+              {formatVariation(state.data.variations['30j'])}
             </p>
           )}
 
-          <div>
-            <span className="text-xs text-gray-500">Prix actuel</span>
-            <p className="font-semibold text-gray-900">
-              {state.data.prix_eur !== null
-                ? `${state.data.prix_eur.toFixed(2)} EUR`
-                : state.data.current_price !== null
-                  ? `${state.data.current_price.toFixed(2)} ${state.data.devise}`
-                  : 'n/a'}
-            </p>
-            {state.data.variations && (
-              <p className="text-xs text-gray-500">
-                1j: {formatVariation(state.data.variations['1j'])} - 7j:{' '}
-                {formatVariation(state.data.variations['7j'])} - 30j:{' '}
-                {formatVariation(state.data.variations['30j'])}
-              </p>
-            )}
-          </div>
+          <DirectionProbabilityBar direction={state.data.direction_probabilities} />
 
           <div className="grid grid-cols-2 gap-2">
             <ScoreCell label="Prix/Valorisation" value={state.data.price_valuation_score} />
