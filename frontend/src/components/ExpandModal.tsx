@@ -10,6 +10,14 @@ interface ExpandModalProps {
   onClose: () => void
   /** Optional heading shown in the modal's top bar, next to the close button. */
   title?: string
+  /**
+   * When true, the panel fills nearly the whole viewport instead of the
+   * default reading-width card. Meant for interactive content that needs
+   * real screen space to be useful (a force-directed graph, a dense table)
+   * rather than for comparison/reading content, which favours the default
+   * bounded width for legibility.
+   */
+  fullScreen?: boolean
   children: React.ReactNode
 }
 
@@ -43,8 +51,15 @@ interface ExpandModalProps {
  *   <ExpandModal isOpen={expanded !== null} onClose={() => setExpanded(null)} title="Comparaison">
  *     {expanded && <MyRichComparisonView data={expanded} />}
  *   </ExpandModal>
+ *
+ * For content that needs the full viewport instead (an interactive graph,
+ * a large table), pass `fullScreen`:
+ *
+ *   <ExpandModal isOpen={open} onClose={() => setOpen(false)} title="Knowledge Graph" fullScreen>
+ *     <GraphView nodes={nodes} edges={edges} height="h-[80vh]" />
+ *   </ExpandModal>
  */
-export function ExpandModal({ isOpen, onClose, title, children }: ExpandModalProps) {
+export function ExpandModal({ isOpen, onClose, title, fullScreen, children }: ExpandModalProps) {
   // Lags `isOpen` by TRANSITION_MS on the way out only, so the panel is
   // still in the DOM (and CSS can transition it back to its closed state)
   // instead of disappearing the instant the caller flips isOpen to false.
@@ -102,9 +117,9 @@ export function ExpandModal({ isOpen, onClose, title, children }: ExpandModalPro
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className={`flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg bg-white shadow-xl transition-all duration-200 ${
-          visible ? 'scale-100 opacity-100' : 'scale-95 opacity-0'
-        }`}
+        className={`flex w-full flex-col overflow-hidden rounded-lg bg-white shadow-xl transition-all duration-200 ${
+          fullScreen ? 'h-[92vh] max-w-none' : 'max-h-[90vh] max-w-3xl'
+        } ${visible ? 'scale-100 opacity-100' : 'scale-95 opacity-0'}`}
       >
         <div className="flex shrink-0 items-center justify-between border-b border-gray-200 px-5 py-3">
           <h2 className="text-base font-semibold text-gray-900">{title}</h2>
@@ -120,7 +135,7 @@ export function ExpandModal({ isOpen, onClose, title, children }: ExpandModalPro
             </svg>
           </button>
         </div>
-        <div className="overflow-y-auto p-5">{children}</div>
+        <div className={`overflow-y-auto p-5 ${fullScreen ? 'min-h-0 flex-1' : ''}`}>{children}</div>
       </div>
     </div>,
     document.body,

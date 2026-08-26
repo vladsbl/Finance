@@ -7,6 +7,7 @@ import {
   fetchManualRelations,
   fetchTickers,
 } from '../api'
+import { ExpandModal } from '../components/ExpandModal'
 import { GraphView } from '../components/GraphView'
 import { TickerSearch } from '../components/TickerSearch'
 import type { GraphResponse, ManualRelation, TickerListEntry } from '../types'
@@ -67,6 +68,7 @@ export function GraphPage() {
   const [graphState, setGraphState] = useState<GraphState>({ status: 'loading' })
   const [tickersState, setTickersState] = useState<TickersState>({ status: 'loading' })
   const [manualState, setManualState] = useState<ManualState>({ status: 'loading' })
+  const [fullScreen, setFullScreen] = useState(false)
 
   useEffect(() => {
     loadGraph('default', setGraphState)
@@ -113,6 +115,19 @@ export function GraphPage() {
               onSelect={handleCenterOnTicker}
               placeholder="Centrer sur un ticker..."
             />
+          )}
+
+          {graphState.status === 'ready' && graphState.data.nodes.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setFullScreen(true)}
+              className="ml-auto flex items-center gap-1.5 rounded-full border border-gray-300 px-4 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                <path d="M3.75 3.5a.75.75 0 0 0-.75.75v3a.75.75 0 0 0 1.5 0V5h1.75a.75.75 0 0 0 0-1.5h-2.5ZM16.25 3.5h-2.5a.75.75 0 0 0 0 1.5H15.5v2.25a.75.75 0 0 0 1.5 0v-3a.75.75 0 0 0-.75-.75ZM3 13.25a.75.75 0 0 1 .75.75v2.25h1.75a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75ZM16.25 13.25a.75.75 0 0 1 .75.75v3a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75V14a.75.75 0 0 1 .75-.75Z" />
+              </svg>
+              Plein ecran
+            </button>
           )}
         </div>
 
@@ -167,6 +182,53 @@ export function GraphPage() {
           )}
         </div>
       </div>
+
+      {graphState.status === 'ready' && (
+        <ExpandModal
+          isOpen={fullScreen}
+          onClose={() => setFullScreen(false)}
+          title="Knowledge Graph -- vue plein ecran"
+          fullScreen
+        >
+          {/* Same toolbar as the inline card above (recenter button,
+              ticker search) -- without this, the search box is only
+              reachable by closing full-screen mode first, which defeats
+              the point of full-screen browsing a large graph. flex-col +
+              min-h-0 on the graph wrapper is what lets GraphView's
+              height="h-full" actually fill the remaining space below this
+              shrink-0 toolbar row, instead of collapsing to 0. */}
+          <div className="flex h-full flex-col">
+            <div className="flex shrink-0 flex-wrap items-center gap-3 pb-4">
+              <button
+                type="button"
+                onClick={handleShowDefault}
+                className={`rounded-full px-4 py-1.5 text-sm font-medium ${
+                  mode === 'default'
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                Top opportunites du jour
+              </button>
+              {tickersState.status === 'ready' && (
+                <TickerSearch
+                  tickers={tickersState.tickers}
+                  onSelect={handleCenterOnTicker}
+                  placeholder="Centrer sur un ticker..."
+                />
+              )}
+            </div>
+            <div className="min-h-0 flex-1">
+              <GraphView
+                nodes={graphState.data.nodes}
+                edges={graphState.data.edges}
+                onNodeClick={handleCenterOnTicker}
+                height="h-full"
+              />
+            </div>
+          </div>
+        </ExpandModal>
+      )}
 
       <AddRelationForm
         tickersState={tickersState}

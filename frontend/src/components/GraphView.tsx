@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import ForceGraph2D, { type ForceGraphMethods } from 'react-force-graph-2d'
 import type { GraphEdge, GraphNode } from '../types'
 
@@ -10,6 +10,9 @@ interface GraphViewProps {
   nodes: GraphNode[]
   edges: GraphEdge[]
   onNodeClick?: (ticker: string) => void
+  /** Tailwind height class for the graph's container. Defaults to the
+   * inline card size; the full-screen view (GraphPage) passes a taller one. */
+  height?: string
 }
 
 // react-force-graph-2d over vis-network here: dashboard/app.py's pyvis
@@ -27,8 +30,37 @@ interface GraphViewProps {
 // circles vs vis-network's DOM/SVG nodes) won't be pixel-identical to the
 // Streamlit page, but nothing in the task asked for that -- only an
 // interactive graph with zoom/recenter, cleanly wired into React.
-export function GraphView({ nodes, edges, onNodeClick }: GraphViewProps) {
+export function GraphView({ nodes, edges, onNodeClick, height = 'h-[560px]' }: GraphViewProps) {
   const fgRef = useRef<ForceGraphMethods<GraphNode, GraphEdge> | undefined>(undefined)
+  const containerRef = useRef<HTMLDivElement>(null)
+  // ForceGraph2D's `width`/`height` props default to window.innerWidth/
+  // innerHeight when omitted (NOT the size of whatever container it's
+  // rendered into -- react-force-graph has no auto-sizing of its own).
+  // That mismatch is exactly what broke "recentrer": zoomToFit() centers
+  // the graph within the CANVAS's own coordinate space, which -- left at
+  // the window's full size -- is much bigger than this component's actual
+  // visible box (clipped by its `overflow-hidden` container). The graph
+  // WAS being centered correctly, just centered within a canvas far
+  // larger than the visible viewport, so the visible top-left corner only
+  // ever showed that oversized canvas's own top-left region instead of
+  // its true center. Measuring the real container box with a
+  // ResizeObserver and passing those exact pixel dimensions as `width`/
+  // `height` below makes the canvas's coordinate space match what is
+  // actually visible, so zoomToFit's center is the real center.
+  const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (!entry) return
+      const { width, height: measuredHeight } = entry.contentRect
+      setDimensions({ width, height: measuredHeight })
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
 
   function zoomBy(factor: number) {
     const fg = fgRef.current
@@ -41,7 +73,10 @@ export function GraphView({ nodes, edges, onNodeClick }: GraphViewProps) {
   }
 
   return (
-    <div className="relative h-[560px] w-full overflow-hidden rounded-md border border-gray-200 bg-gray-50">
+    <div
+      ref={containerRef}
+      className={`relative ${height} w-full overflow-hidden rounded-md border border-gray-200 bg-gray-50`}
+    >
       <div className="absolute right-3 top-3 z-10 flex flex-col gap-1.5">
         <button
           type="button"
@@ -73,9 +108,18 @@ export function GraphView({ nodes, edges, onNodeClick }: GraphViewProps) {
         <div className="flex h-full items-center justify-center text-sm text-gray-500">
           Aucune relation a afficher.
         </div>
+      ) : !dimensions ? (
+        <div className="flex h-full items-center justify-center text-sm text-gray-500">
+          <span
+            className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
+            aria-hidden="true"
+          />
+        </div>
       ) : (
         <ForceGraph2D<GraphNode, GraphEdge>
           ref={fgRef}
+          width={dimensions.width}
+          height={dimensions.height}
           graphData={{ nodes, links: edges }}
           nodeLabel={(n) => `${n.display_name}${n.ticker ? ` (${n.ticker})` : ''}`}
           nodeColor={(n) => (n.kind === 'primary' ? PRIMARY_COLOR : EXTERNAL_COLOR)}

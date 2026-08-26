@@ -1,7 +1,13 @@
 import { useMemo, useRef, useState } from 'react'
+import { bestNameMatchDistance, fuzzyMaxDistance } from '../fuzzySearch'
 import type { TickerListEntry } from '../types'
 
 const MAX_SUGGESTIONS = 20
+
+// Fuzzy fallback only kicks in past this length -- below it, a couple of
+// typo-tolerant edits would match almost anything and the suggestion list
+// stops being useful.
+const MIN_QUERY_LENGTH_FOR_FUZZY = 3
 
 interface TickerSearchProps {
   tickers: TickerListEntry[]
@@ -24,10 +30,24 @@ export function TickerSearch({ tickers, onSelect, placeholder }: TickerSearchPro
   const suggestions = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return []
-    const matches = tickers.filter(
+
+    const substringMatches = tickers.filter(
       (t) => t.ticker.toLowerCase().includes(q) || t.nom_affiche.toLowerCase().includes(q),
     )
-    return matches.slice(0, MAX_SUGGESTIONS)
+    if (substringMatches.length > 0) return substringMatches.slice(0, MAX_SUGGESTIONS)
+
+    // Nothing matched literally -- fall back to a typo-tolerant search on
+    // the company NAME only (never the ticker: a ticker is a short exact
+    // code, "correcting" it would just be a wrong guess). Handles "Aple" or
+    // "Microsft" still finding Apple / Microsoft.
+    if (q.length < MIN_QUERY_LENGTH_FOR_FUZZY) return []
+    const maxDist = fuzzyMaxDistance(q.length)
+    const fuzzyMatches = tickers
+      .map((t) => ({ t, dist: bestNameMatchDistance(q, t.nom_affiche.toLowerCase()) }))
+      .filter((entry) => entry.dist <= maxDist)
+      .sort((a, b) => a.dist - b.dist)
+      .map((entry) => entry.t)
+    return fuzzyMatches.slice(0, MAX_SUGGESTIONS)
   }, [tickers, query])
 
   function pick(entry: TickerListEntry) {
