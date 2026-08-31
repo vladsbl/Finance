@@ -11,6 +11,7 @@ import {
 } from 'recharts'
 import {
   ApiError,
+  fetchNews,
   fetchStockArguedText,
   fetchStockChart,
   fetchStockDetail,
@@ -22,6 +23,7 @@ import { PriceHeadline } from '../components/PriceHeadline'
 import { TickerSearch } from '../components/TickerSearch'
 import type {
   ArguedTextSource,
+  NewsItem,
   StockChartResponse,
   StockDetail,
   TickerListEntry,
@@ -47,6 +49,16 @@ type ArguedTextState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
   | { status: 'done'; texte: string | null; source: ArguedTextSource }
+
+type NewsSourcesState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; news: NewsItem[] }
+
+// Kept small -- this section only points the reader to the underlying
+// articles, it isn't a substitute for the News & Analyse IA page's own
+// full, paginated list for this ticker.
+const SOURCES_LIMIT = 10
 
 function fmt(value: number | null, decimals = 1): string {
   return value === null ? 'n/a' : value.toFixed(decimals)
@@ -91,12 +103,28 @@ function loadChart(ticker: string, setState: (s: ChartState) => void) {
     })
 }
 
+// Reuses GET /api/news's own `ticker` filter -- the exact same route and
+// data (news_raw JOIN news_analysis) that News & Analyse IA's own "Lire
+// l'article source" link is built from -- no dedicated route for this
+// section.
+function loadNewsSources(ticker: string, setState: (s: NewsSourcesState) => void) {
+  setState({ status: 'loading' })
+  fetchNews(SOURCES_LIMIT, 0, ticker)
+    .then((data) => setState({ status: 'ready', news: data.news }))
+    .catch((err) => {
+      const message =
+        err instanceof ApiError ? err.message : 'Erreur inattendue lors du chargement des sources.'
+      setState({ status: 'error', message })
+    })
+}
+
 export function StockPage() {
   const [tickersState, setTickersState] = useState<TickersState>({ status: 'loading' })
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null)
   const [detailState, setDetailState] = useState<DetailState | null>(null)
   const [chartState, setChartState] = useState<ChartState | null>(null)
   const [arguedText, setArguedText] = useState<ArguedTextState>({ status: 'idle' })
+  const [newsSources, setNewsSources] = useState<NewsSourcesState | null>(null)
 
   useEffect(() => {
     loadTickers(setTickersState)
@@ -106,6 +134,7 @@ export function StockPage() {
     setSelectedTicker(ticker)
     loadDetail(ticker, setDetailState)
     loadChart(ticker, setChartState)
+    loadNewsSources(ticker, setNewsSources)
     // A new ticker resets any argued text from the previous selection --
     // never carried over, and never auto-generated for the new ticker
     // either (still requires its own explicit button click, same Groq-
@@ -187,6 +216,8 @@ export function StockPage() {
           chartState={chartState}
           arguedText={arguedText}
           onGenerateArguedText={handleGenerateArguedText}
+          newsSources={newsSources}
+          onRetryNewsSources={() => loadNewsSources(detailState.data.ticker, setNewsSources)}
         />
       )}
     </div>
@@ -198,11 +229,15 @@ function StockDetailView({
   chartState,
   arguedText,
   onGenerateArguedText,
+  newsSources,
+  onRetryNewsSources,
 }: {
   detail: StockDetail
   chartState: ChartState | null
   arguedText: ArguedTextState
   onGenerateArguedText: () => void
+  newsSources: NewsSourcesState | null
+  onRetryNewsSources: () => void
 }) {
   return (
     <div className="mt-6 flex flex-col gap-6">
@@ -322,7 +357,86 @@ function StockDetailView({
           )}
         </div>
       </div>
+
+      <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+        <h3 className="text-base font-semibold text-gray-900">Sources</h3>
+        <NewsSourcesSection
+          ticker={detail.ticker}
+          newsSources={newsSources}
+          onRetry={onRetryNewsSources}
+        />
+      </div>
     </div>
+  )
+}
+
+function NewsSourcesSection({
+  ticker,
+  newsSources,
+  onRetry,
+}: {
+  ticker: string
+  newsSources: NewsSourcesState | null
+  onRetry: () => void
+}) {
+  if (!newsSources || newsSources.status === 'loading') {
+    return (
+      <div className="mt-3 flex items-center gap-2 text-sm text-gray-500">
+        <span
+          className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
+          aria-hidden="true"
+        />
+        Chargement des sources...
+      </div>
+    )
+  }
+
+  if (newsSources.status === 'error') {
+    return (
+      <div className="mt-3 text-sm text-red-600">
+        {newsSources.message}
+        <button
+          type="button"
+          onClick={onRetry}
+          className="ml-2 font-medium underline hover:no-underline"
+        >
+          Reessayer
+        </button>
+      </div>
+    )
+  }
+
+  if (newsSources.news.length === 0) {
+    return (
+      <p className="mt-3 text-sm text-gray-500">
+        Aucune news analysee pour {ticker} pour l'instant -- pas de source disponible.
+      </p>
+    )
+  }
+
+  return (
+    <ul className="mt-3 flex flex-col gap-2">
+      {newsSources.news.map((item) => (
+        <li key={item.news_id} className="text-sm">
+          {item.url ? (
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-indigo-700 hover:underline"
+            >
+              {item.title}
+            </a>
+          ) : (
+            <span className="text-gray-700">{item.title}</span>
+          )}
+          <span className="ml-2 text-xs text-gray-400">
+            {(item.published_at || '').slice(0, 10)}
+            {item.source ? ` -- ${item.source}` : ''}
+          </span>
+        </li>
+      ))}
+    </ul>
   )
 }
 
