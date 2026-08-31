@@ -31,6 +31,7 @@ import re
 import sqlite3
 import sys
 import time
+import unicodedata
 from datetime import date
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -104,17 +105,18 @@ logger = logging.getLogger("analyze_news")
 
 CREATE_ANALYSIS_SQL = """
 CREATE TABLE IF NOT EXISTS news_analysis (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    news_id     INTEGER NOT NULL UNIQUE,
-    company     TEXT,
-    sector      TEXT,
-    importance  INTEGER,
-    tonalite    TEXT,
-    impact      TEXT,
-    horizon     TEXT,
-    confidence  REAL,
-    model       TEXT,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    news_id           INTEGER NOT NULL UNIQUE,
+    company           TEXT,
+    sector            TEXT,
+    zone_geographique TEXT,
+    importance        INTEGER,
+    tonalite          TEXT,
+    impact            TEXT,
+    horizon           TEXT,
+    confidence        REAL,
+    model             TEXT,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (news_id) REFERENCES news_raw (id)
 );
 """
@@ -126,12 +128,28 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 """
 
+
+def _ensure_zone_geographique_column(conn):
+    """CREATE TABLE IF NOT EXISTS is a no-op on an already-existing table,
+    so a news_analysis table created before zone_geographique existed needs
+    an explicit migration -- same pattern as this module's own
+    _ensure_narratives_horizon_column. Existing rows simply get NULL (see
+    NEWS_SQL/load_news's own "non renseigne" handling downstream) -- never
+    backfilled, since that would require re-analysing 1000+ already-cached
+    news items for a field that didn't exist when they were first
+    analysed."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(news_analysis)")}
+    if "zone_geographique" not in columns:
+        conn.execute("ALTER TABLE news_analysis ADD COLUMN zone_geographique TEXT")
+        conn.commit()
+
+
 INSERT_ANALYSIS_SQL = """
 INSERT OR IGNORE INTO news_analysis
-    (news_id, company, sector, importance, tonalite, impact,
+    (news_id, company, sector, zone_geographique, importance, tonalite, impact,
      horizon, confidence, model)
 VALUES
-    (:news_id, :company, :sector, :importance, :tonalite, :impact,
+    (:news_id, :company, :sector, :zone_geographique, :importance, :tonalite, :impact,
      :horizon, :confidence, :model);
 """
 
@@ -241,7 +259,13 @@ SYSTEM_PROMPT = (
     "valide, sans texte autour, avec exactement ces cles:\n"
     '{\n'
     '  "company": string,            // entreprise concernee\n'
-    '  "sector": string,             // secteur d\'activite\n'
+    '  "sector": string,             // secteur d\'activite (ex: Technologie, '
+    'Pharmaceutique, Defense, Energie, Finance, Automobile...)\n'
+    '  "zone_geographique": string,  // zone geographique principalement '
+    'concernee par cette news (ex: Etats-Unis, Europe, Chine, Moyen-Orient, '
+    'Asie, Amerique latine, International) -- deduite du siege/marche '
+    'principal de l\'entreprise ou du contenu de la news elle-meme, jamais '
+    'devinee au hasard si rien ne l\'indique\n'
     '  "importance": integer,        // 1 (anecdotique) a 10 (majeur)\n'
     '  "tonalite": string,           // "positive" | "neutre" | "negative"\n'
     '  "impact": string,             // impact probable, une phrase courte\n'
@@ -302,6 +326,7 @@ def analyse_one(client, ticker, title, summary):
     return {
         "company": str(data.get("company", "")).strip() or ticker,
         "sector": str(data.get("sector", "")).strip(),
+        "zone_geographique": str(data.get("zone_geographique", "")).strip(),
         "importance": _coerce_int(data.get("importance"), 1, 10, 5),
         "tonalite": str(data.get("tonalite", "neutre")).strip().lower(),
         "impact": str(data.get("impact", "")).strip(),
@@ -343,8 +368,8 @@ def analyse_with_retry(client, ticker, title, summary):
 
 NEWS_SQL = """
 SELECT n.id AS news_id, n.ticker, n.title, n.url, n.published_at, n.source,
-       a.company, a.sector, a.importance, a.tonalite, a.impact,
-       a.horizon, a.confidence
+       a.company, a.sector, a.zone_geographique, a.importance, a.tonalite,
+       a.impact, a.horizon, a.confidence
 FROM news_analysis a
 JOIN news_raw n ON n.id = a.news_id
 ORDER BY n.published_at DESC;
@@ -352,8 +377,8 @@ ORDER BY n.published_at DESC;
 
 NEWS_BY_TICKER_SQL = """
 SELECT n.id AS news_id, n.ticker, n.title, n.url, n.published_at, n.source,
-       a.company, a.sector, a.importance, a.tonalite, a.impact,
-       a.horizon, a.confidence
+       a.company, a.sector, a.zone_geographique, a.importance, a.tonalite,
+       a.impact, a.horizon, a.confidence
 FROM news_analysis a
 JOIN news_raw n ON n.id = a.news_id
 WHERE n.ticker = ?
@@ -370,13 +395,165 @@ def load_news(conn, ticker=None):
     (ticker, importance DESC, published_at DESC): that page always scopes
     to one ticker first via a selectbox, so grouping by ticker was moot
     there. The API additionally serves an unscoped "all recent news"
-    default view, so global recency is the natural primary sort here."""
+    default view, so global recency is the natural primary sort here.
+
+    Runs _ensure_zone_geographique_column() first (not just in main()'s own
+    CREATE_ANALYSIS_SQL path) so the API's read-only path also self-heals
+    against a news_analysis table created before zone_geographique existed
+    -- this is the API's actual entry point into news_analysis, and it
+    never goes through main()."""
+    _ensure_zone_geographique_column(conn)
     conn.row_factory = sqlite3.Row
     if ticker:
         rows = conn.execute(NEWS_BY_TICKER_SQL, (ticker,)).fetchall()
     else:
         rows = conn.execute(NEWS_SQL).fetchall()
     return [dict(r) for r in rows]
+
+
+# --- Free-text search + sector/zone filters (News & Analyse IA page) -------
+#
+# All three operate on load_news()'s already-fetched dict list, same
+# Python-side/casefold() convention as reasoning/correlation_discovery.py's
+# filter_correlations_by_name -- reused deliberately, not reinvented, per
+# the task that added these filters. Applied BEFORE the direction filter in
+# api/routers/news.py's own get_news() so the (usually much smaller)
+# filtered set is what direction/pagination then work over.
+
+def filter_news_by_search(rows, search):
+    """Keep only news whose title, company, sector, zone_geographique OR
+    ticker contains `search` (case-insensitive substring). Searches the
+    ticker too -- not one of the 4 fields this free-text search was scoped
+    to (title/company/sector/zone) -- so a reader who already knows the
+    ticker isn't worse off than with the exact-ticker filter this replaces
+    on the News & Analyse IA page; StockPage's own "Sources" section keeps
+    using the separate EXACT `ticker` query param instead, unaffected by
+    this.
+
+    An empty/whitespace-only `search` returns `rows` unchanged, so a caller
+    can pass an unset query parameter straight through without branching."""
+    if not search or not search.strip():
+        return rows
+    needle = search.strip().casefold()
+    return [
+        row for row in rows
+        if needle in (row["title"] or "").casefold()
+        or needle in (row["company"] or "").casefold()
+        or needle in (row["sector"] or "").casefold()
+        or needle in (row["zone_geographique"] or "").casefold()
+        or needle in (row["ticker"] or "").casefold()
+    ]
+
+
+def filter_news_by_sector(rows, sector):
+    """Exact (case-insensitive) match on the sector field ALREADY produced
+    by this module's own SYSTEM_PROMPT -- deliberately no fuzzy/partial
+    matching (unlike filter_news_by_search): `sector` is expected to come
+    from a dropdown built from the real distinct values in news_analysis
+    (see load_news_facets), always one of those exact strings, never free
+    text a user typed.
+
+    A row with sector NULL/empty (analysed before this field existed, or a
+    rare empty LLM answer) never matches any sector filter -- excluded
+    cleanly rather than lumped into a confusing "None" bucket (see
+    load_news_facets' own docstring for why such a bucket is never even
+    offered to pick)."""
+    if not sector or not sector.strip():
+        return rows
+    needle = sector.strip().casefold()
+    return [row for row in rows if (row["sector"] or "").casefold() == needle]
+
+
+def _normalize_zone(value):
+    """casefold() + strip diacritics (Unicode NFKD, drop combining marks)
+    -- e.g. "États-Unis" and "Etats-Unis" both normalise to
+    "etats-unis". Exists because zone_geographique is free-text LLM output
+    like sector, but unlike sector's much deeper vocabulary sprawl (450+
+    distinct real values at last count, near-duplicates from genuine
+    synonyms like "Finance"/"Services financiers" that no accent-only
+    normalisation could ever merge -- see filter_news_by_sector's own
+    docstring for why sector gets none), the handful of real zone values
+    observed so far differ ONLY by a missed accent on an otherwise-
+    identical name (a single day of real Groq calls already produced both
+    spellings of the same country) -- a narrow, mechanically-fixable case
+    worth handling so the zone filter doesn't show two options for the
+    same country."""
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def filter_news_by_zone(rows, zone):
+    """Same exact-match convention as filter_news_by_sector, but comparing
+    _normalize_zone() on both sides so "Etats-Unis" and "États-Unis"
+    are treated as the same zone."""
+    if not zone or not zone.strip():
+        return rows
+    needle = _normalize_zone(zone.strip())
+    return [
+        row for row in rows
+        if row["zone_geographique"] and _normalize_zone(row["zone_geographique"]) == needle
+    ]
+
+
+FACETS_SECTOR_SQL = """
+SELECT sector, COUNT(*) AS n
+FROM news_analysis
+WHERE sector IS NOT NULL AND sector != ''
+GROUP BY sector
+ORDER BY n DESC, sector ASC;
+"""
+
+FACETS_ZONE_SQL = """
+SELECT zone_geographique, COUNT(*) AS n
+FROM news_analysis
+WHERE zone_geographique IS NOT NULL AND zone_geographique != ''
+GROUP BY zone_geographique
+ORDER BY n DESC, zone_geographique ASC;
+"""
+
+
+def load_news_facets(conn):
+    """{"sectors": [{"value", "count"}], "zones": [{"value", "count"}]} --
+    the real distinct values currently in news_analysis, most common
+    first, for the News & Analyse IA page's filter widgets to be built
+    FROM (never a hardcoded/assumed taxonomy). Real counts at the time
+    this feature was added: 450+ distinct sector strings (discouraging
+    anything but a searchable/native dropdown) vs. a handful of zone
+    strings (small enough for a button row) -- see the task that measured
+    this before picking either widget.
+
+    Rows with sector/zone_geographique NULL or empty (news analysed before
+    zone_geographique existed, or a rare empty LLM answer) are excluded
+    from BOTH lists entirely -- never surfaced as a confusing "None"/"Non
+    renseigne" option, since filtering by "nothing" isn't a meaningful
+    user action (see filter_news_by_sector/filter_news_by_zone's own
+    docstrings: those rows simply never match any real filter value).
+
+    `sectors` is returned AS-IS (see filter_news_by_sector's own docstring
+    for why sector deliberately gets no normalisation). `zones` is grouped
+    by _normalize_zone() instead: each group's `value` is its MOST
+    FREQUENT raw spelling (ties broken alphabetically), `count` sums every
+    raw variant in that group -- so "Etats-Unis" and "États-Unis"
+    appear as ONE filterable option instead of two."""
+    _ensure_zone_geographique_column(conn)
+
+    sectors = [
+        {"value": sector, "count": count}
+        for sector, count in conn.execute(FACETS_SECTOR_SQL).fetchall()
+    ]
+
+    zone_groups = {}  # normalized key -> {raw_spelling: count}
+    for zone, count in conn.execute(FACETS_ZONE_SQL).fetchall():
+        variants = zone_groups.setdefault(_normalize_zone(zone), {})
+        variants[zone] = variants.get(zone, 0) + count
+
+    zones = []
+    for variants in zone_groups.values():
+        canonical, _ = sorted(variants.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        zones.append({"value": canonical, "count": sum(variants.values())})
+    zones.sort(key=lambda z: (-z["count"], z["value"]))
+
+    return {"sectors": sectors, "zones": zones}
 
 
 def price_before_after_news(conn, ticker, published_at):
@@ -921,6 +1098,7 @@ def main(argv=None):
         conn.execute(CREATE_ANALYSIS_SQL)
         conn.execute(CREATE_USAGE_SQL)
         conn.commit()
+        _ensure_zone_geographique_column(conn)
     except sqlite3.Error as exc:
         logger.error("Database error: %s", exc)
         return 1

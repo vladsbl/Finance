@@ -109,7 +109,7 @@ function loadChart(ticker: string, setState: (s: ChartState) => void) {
 // section.
 function loadNewsSources(ticker: string, setState: (s: NewsSourcesState) => void) {
   setState({ status: 'loading' })
-  fetchNews(SOURCES_LIMIT, 0, ticker)
+  fetchNews(SOURCES_LIMIT, 0, { ticker })
     .then((data) => setState({ status: 'ready', news: data.news }))
     .catch((err) => {
       const message =

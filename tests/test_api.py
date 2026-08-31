@@ -1189,9 +1189,12 @@ def test_news_returns_expected_top_level_shape():
     resp = client.get("/api/news")
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"news", "n_total", "ticker", "limit", "offset"}
+    assert set(body.keys()) == {"news", "n_total", "ticker", "search", "sector", "zone", "limit", "offset"}
     assert isinstance(body["news"], list)
     assert body["ticker"] is None
+    assert body["search"] is None
+    assert body["sector"] is None
+    assert body["zone"] is None
     assert body["n_total"] >= len(body["news"])
 
 
@@ -1203,8 +1206,8 @@ def test_news_item_shape():
     item = items[0]
     expected_keys = {
         "news_id", "ticker", "title", "url", "published_at", "source", "company",
-        "sector", "importance", "tonalite", "impact", "horizon", "confidence",
-        "summary_paragraph", "price_context", "direction_probabilities",
+        "sector", "zone_geographique", "importance", "tonalite", "impact", "horizon",
+        "confidence", "summary_paragraph", "price_context", "direction_probabilities",
     }
     assert set(item.keys()) == expected_keys
     assert isinstance(item["summary_paragraph"], str) and item["summary_paragraph"]
@@ -1214,6 +1217,19 @@ def test_news_item_shape():
         "insufficient_data", "insufficient_reason",
     }
     assert set(item["price_context"].keys()) == price_ctx_keys
+
+
+def test_news_item_zone_geographique_is_none_for_pre_existing_rows_without_crashing():
+    """Every news_analysis row analysed before zone_geographique existed
+    (the vast majority in this project's real dev DB -- see
+    reasoning/analyze_news.py's _ensure_zone_geographique_column) must
+    return zone_geographique=None cleanly, never a missing key or a 500."""
+    resp = client.get("/api/news", params={"limit": 500})
+    assert resp.status_code == 200
+    items = resp.json()["news"]
+    for item in items:
+        assert "zone_geographique" in item
+        assert item["zone_geographique"] is None or isinstance(item["zone_geographique"], str)
 
 
 def test_news_sorted_by_published_at_descending():
@@ -1233,6 +1249,109 @@ def test_news_ticker_filter_scopes_results():
 def test_news_ticker_filter_is_case_insensitive_and_trimmed():
     resp = client.get("/api/news", params={"ticker": "  aapl  "})
     assert resp.json()["ticker"] == "AAPL"
+
+
+# --- /api/news facets + search/sector/zone filters ---------------------------
+
+def test_news_facets_returns_expected_shape():
+    resp = client.get("/api/news/facets")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"sectors", "zones"}
+    assert isinstance(body["sectors"], list)
+    assert isinstance(body["zones"], list)
+    if body["sectors"]:
+        assert {"value", "count"} == set(body["sectors"][0].keys())
+    if body["zones"]:
+        assert {"value", "count"} == set(body["zones"][0].keys())
+
+
+def test_news_facets_never_include_a_none_bucket():
+    """Rows analysed before sector/zone_geographique existed (or a rare
+    empty LLM answer) must never surface as a "None"/"" filterable option
+    -- see reasoning/analyze_news.py's load_news_facets docstring."""
+    resp = client.get("/api/news/facets")
+    body = resp.json()
+    values = {s["value"] for s in body["sectors"]} | {z["value"] for z in body["zones"]}
+    assert None not in values
+    assert "" not in values
+
+
+def test_news_facets_sorted_by_count_descending():
+    resp = client.get("/api/news/facets")
+    counts = [s["count"] for s in resp.json()["sectors"]]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_news_search_matches_title_case_insensitive_partial():
+    resp = client.get("/api/news", params={"search": "apple", "limit": 500})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["search"] == "apple"
+    assert body["n_total"] > 0
+    for item in body["news"]:
+        haystack = " ".join(filter(None, [
+            item["title"], item["company"], item["sector"], item["zone_geographique"], item["ticker"],
+        ])).casefold()
+        assert "apple" in haystack
+
+
+def test_news_search_is_trimmed_and_empty_string_means_unfiltered():
+    resp = client.get("/api/news", params={"search": "   "})
+    assert resp.json()["search"] is None
+
+
+def test_news_sector_filter_scopes_to_exact_sector():
+    facets = client.get("/api/news/facets").json()
+    if not facets["sectors"]:
+        return  # nothing analysed with a sector yet in this environment
+    sector = facets["sectors"][0]["value"]
+    resp = client.get("/api/news", params={"sector": sector, "limit": 500})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sector"] == sector
+    assert body["n_total"] > 0
+    assert all(n["sector"] == sector for n in body["news"])
+
+
+def test_news_zone_filter_scopes_to_exact_zone():
+    facets = client.get("/api/news/facets").json()
+    if not facets["zones"]:
+        return  # nothing analysed with a zone yet in this environment
+    zone = facets["zones"][0]["value"]
+    resp = client.get("/api/news", params={"zone": zone, "limit": 500})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["zone"] == zone
+    assert body["n_total"] > 0
+
+
+def test_news_unknown_sector_returns_empty_not_error():
+    resp = client.get("/api/news", params={"sector": "SecteurInexistantXYZ"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["news"] == []
+    assert body["n_total"] == 0
+
+
+def test_news_search_sector_zone_and_direction_all_combine():
+    """All independently-optional filters must AND together, not override
+    each other -- see api/routers/news.py's own get_news docstring."""
+    facets = client.get("/api/news/facets").json()
+    if not facets["sectors"]:
+        return
+    sector = facets["sectors"][0]["value"]
+    combined = client.get(
+        "/api/news",
+        params={"sector": sector, "direction": "hausse", "limit": 500},
+    ).json()
+    sector_only = client.get("/api/news", params={"sector": sector, "limit": 500}).json()
+    # The combined result must be a subset of the sector-only result (never
+    # MORE rows -- combining filters can only narrow, never widen).
+    combined_ids = {n["news_id"] for n in combined["news"]}
+    sector_only_ids = {n["news_id"] for n in sector_only["news"]}
+    assert combined_ids <= sector_only_ids
+    assert all(n["sector"] == sector for n in combined["news"])
 
 
 def test_news_price_context_has_real_variation_for_known_ticker():

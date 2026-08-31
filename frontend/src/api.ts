@@ -5,6 +5,7 @@ import type {
   CompanyDescriptionResponse,
   CausalReasoningRunStats,
   CausalReasoningStatus,
+  NewsFacetsResponse,
   NewsNarrativeResponse,
   NewsResponse,
   CorrelationsResponse,
@@ -209,15 +210,37 @@ export function runCausalReasoning(): Promise<CausalReasoningRunStats> {
 
 // --- /api/news ------------------------------------------------------------------
 
-export function fetchNews(
-  limit = 50,
-  offset = 0,
-  ticker?: string,
-  direction: DirectionFilterValue = 'toutes',
-): Promise<NewsResponse> {
-  const params = new URLSearchParams({ limit: String(limit), offset: String(offset), direction })
-  if (ticker && ticker.trim()) params.set('ticker', ticker.trim())
+// Grouped into one options object (rather than more positional params)
+// specifically because GET /api/news now combines FIVE independent filters
+// (see api/routers/news.py's own get_news docstring) -- a 6th positional
+// bool/string param would be unreadable at call sites. All optional: an
+// empty/omitted filters object is the unfiltered "all recent news" view.
+export interface NewsFilters {
+  ticker?: string
+  search?: string
+  sector?: string
+  zone?: string
+  direction?: DirectionFilterValue
+}
+
+export function fetchNews(limit = 50, offset = 0, filters: NewsFilters = {}): Promise<NewsResponse> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+    direction: filters.direction ?? 'toutes',
+  })
+  if (filters.ticker?.trim()) params.set('ticker', filters.ticker.trim())
+  if (filters.search?.trim()) params.set('search', filters.search.trim())
+  if (filters.sector?.trim()) params.set('sector', filters.sector.trim())
+  if (filters.zone?.trim()) params.set('zone', filters.zone.trim())
   return getJson<NewsResponse>(`/news?${params.toString()}`)
+}
+
+// Populates the News & Analyse IA page's sector/zone filter widgets --
+// fetched once (not per keystroke/filter change like fetchNews itself),
+// see api/routers/news.py's GET /api/news/facets for the full contract.
+export function fetchNewsFacets(): Promise<NewsFacetsResponse> {
+  return getJson<NewsFacetsResponse>('/news/facets')
 }
 
 // On-demand only (see api/routers/news.py's own docstring) -- never called

@@ -401,6 +401,7 @@ export interface NewsItem {
   source: string | null
   company: string | null
   sector: string | null
+  zone_geographique: string | null
   importance: number | null
   tonalite: Tonalite
   impact: string | null
@@ -415,8 +416,22 @@ export interface NewsResponse {
   news: NewsItem[]
   n_total: number
   ticker: string | null
+  search: string | null
+  sector: string | null
+  zone: string | null
   limit: number
   offset: number
+}
+
+// Mirrors api/routers/news.py's GET /api/news/facets exactly.
+export interface NewsFacetValue {
+  value: string
+  count: number
+}
+
+export interface NewsFacetsResponse {
+  sectors: NewsFacetValue[]
+  zones: NewsFacetValue[]
 }
 
 // Mirrors api/routers/news.py's GET /api/news/{news_id}/narrative exactly.

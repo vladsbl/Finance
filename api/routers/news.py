@@ -15,8 +15,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from api.dependencies import get_db
 from dashboard.currency import get_rate_to_eur
 from reasoning.analyze_news import (
+    filter_news_by_search,
+    filter_news_by_sector,
+    filter_news_by_zone,
     get_or_generate_news_narrative,
     load_news,
+    load_news_facets,
     news_summary_paragraph,
     price_before_after_news,
 )
@@ -107,6 +111,7 @@ def _news_to_dict(conn, row, direction):
         "source": row["source"],
         "company": row["company"],
         "sector": row["sector"],
+        "zone_geographique": row["zone_geographique"],
         "importance": row["importance"],
         "tonalite": row["tonalite"],
         "impact": row["impact"],
@@ -146,9 +151,27 @@ def _build_directions_by_ticker(conn, tickers):
     return directions
 
 
+@router.get("/facets")
+def get_news_facets(conn=Depends(get_db)):
+    """Distinct sector/zone values currently in news_analysis, most common
+    first -- for the News & Analyse IA page's filter widgets to be built
+    FROM. See reasoning/analyze_news.py's load_news_facets for the full
+    contract (no None/empty bucket, zone accent-normalised so "Etats-Unis"
+    and "États-Unis" collapse into one option)."""
+    return load_news_facets(conn)
+
+
 @router.get("")
 def get_news(
-    ticker: str | None = Query(None, description="Filtre sur un ticker precis"),
+    ticker: str | None = Query(None, description="Filtre sur un ticker precis (match exact)"),
+    search: str | None = Query(
+        None,
+        description="Recherche libre (titre, entreprise, secteur, zone, ticker), partielle et insensible a la casse",
+    ),
+    sector: str | None = Query(None, description="Filtre sur un secteur precis (match exact)"),
+    zone: str | None = Query(
+        None, description="Filtre sur une zone geographique precise (match exact, accents ignores)"
+    ),
     direction: str = Query("toutes", description="toutes | hausse | stagnation | baisse"),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Lignes par page"),
     offset: int = Query(0, ge=0, description="Nombre de lignes a sauter"),
@@ -160,15 +183,22 @@ def get_news(
     (ticker-then-importance-then-recency, moot there since that page
     always scopes to one ticker first via a selectbox).
 
-    `direction` filters on each item's ticker's DOMINANT hausse/stagnation/
-    baisse scenario -- applied server-side, BEFORE pagination, same
-    reasoning as /api/opportunities' own `direction` param: this list
-    genuinely paginates (hundreds of news across many pages), so a
-    client-side filter would only narrow whatever page is currently
-    loaded. `direction_probabilities` itself is the GENERAL (non-news-
-    specific) read, computed once per distinct ticker via
-    _build_directions_by_ticker -- a pure, Groq-free computation, not the
-    enriched narrative's own per-news-item version.
+    `search`/`sector`/`zone`/`direction` ALL combine (AND'd together, e.g.
+    search="Apple" + direction="hausse" narrows to Apple-matching news
+    whose ticker also currently leans hausse) -- applied server-side,
+    BEFORE pagination, same reasoning as /api/opportunities' own
+    `direction` param: this list genuinely paginates (hundreds of news
+    across many pages), so a client-side filter would only narrow whatever
+    page is currently loaded.
+
+    search/sector/zone are applied FIRST (see
+    reasoning/analyze_news.py's filter_news_by_search/_sector/_zone) so
+    the (usually much smaller) remaining set is what the more expensive
+    per-ticker direction computation then runs over -- not the reverse.
+    `direction_probabilities` itself is the GENERAL (non-news-specific)
+    read, computed once per distinct ticker via _build_directions_by_ticker
+    -- a pure, Groq-free computation, not the enriched narrative's own
+    per-news-item version.
 
     `limit`/`offset` paginate the already-sorted, already-filtered list,
     same convention as /api/opportunities and /api/correlations."""
@@ -181,6 +211,10 @@ def get_news(
         )
 
     rows = load_news(conn, ticker)
+    rows = filter_news_by_search(rows, search)
+    rows = filter_news_by_sector(rows, sector)
+    rows = filter_news_by_zone(rows, zone)
+
     directions_by_ticker = _build_directions_by_ticker(conn, (r["ticker"] for r in rows))
 
     if direction != "toutes":
@@ -197,6 +231,9 @@ def get_news(
         "news": [_news_to_dict(conn, r, directions_by_ticker.get(r["ticker"])) for r in page],
         "n_total": n_total,
         "ticker": ticker,
+        "search": (search or "").strip() or None,
+        "sector": (sector or "").strip() or None,
+        "zone": (zone or "").strip() or None,
         "limit": limit,
         "offset": offset,
     }

@@ -21,13 +21,13 @@ interface TickerSearchProps {
 // Filtering happens entirely client-side against the already-loaded
 // GET /api/tickers list (fetched once by the parent), so keystrokes never
 // hit the network.
-export function TickerSearch({ tickers, onSelect, placeholder }: TickerSearchProps) {
-  const [query, setQuery] = useState('')
-  const [isOpen, setIsOpen] = useState(false)
-  const [activeIndex, setActiveIndex] = useState(-1)
-  const inputRef = useRef<HTMLInputElement>(null)
-
-  const suggestions = useMemo(() => {
+// Extracted from TickerSearch's own render so a second, differently-styled
+// input (NewsPage.tsx's free-text search, which layers ticker suggestions
+// on top of its own multi-field search) can compute the exact same
+// substring-then-fuzzy suggestion list without duplicating -- or drifting
+// from -- this matching logic.
+export function useTickerSuggestions(tickers: TickerListEntry[], query: string): TickerListEntry[] {
+  return useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return []
 
@@ -49,6 +49,49 @@ export function TickerSearch({ tickers, onSelect, placeholder }: TickerSearchPro
       .map((entry) => entry.t)
     return fuzzyMatches.slice(0, MAX_SUGGESTIONS)
   }, [tickers, query])
+}
+
+// Presentational dropdown, also shared with NewsPage.tsx's own search
+// input -- so the two suggestion lists look and behave identically
+// (same active-row highlight, same mousedown-preventDefault trick to keep
+// the input focused through a click) without copy-pasting the markup.
+export function TickerSuggestionsList({
+  suggestions,
+  activeIndex,
+  onPick,
+}: {
+  suggestions: TickerListEntry[]
+  activeIndex: number
+  onPick: (entry: TickerListEntry) => void
+}) {
+  return (
+    <ul className="absolute z-10 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-gray-200 bg-white text-sm shadow-lg">
+      {suggestions.map((entry, i) => (
+        <li key={entry.ticker}>
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()} // keep input focus so onBlur doesn't fire first
+            onClick={() => onPick(entry)}
+            className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left ${
+              i === activeIndex ? 'bg-indigo-50' : 'hover:bg-gray-50'
+            }`}
+          >
+            <span className="font-medium text-gray-900">{entry.ticker}</span>
+            <span className="truncate text-gray-500">{entry.nom_affiche}</span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+export function TickerSearch({ tickers, onSelect, placeholder }: TickerSearchProps) {
+  const [query, setQuery] = useState('')
+  const [isOpen, setIsOpen] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(-1)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const suggestions = useTickerSuggestions(tickers, query)
 
   function pick(entry: TickerListEntry) {
     onSelect(entry.ticker)
@@ -97,23 +140,7 @@ export function TickerSearch({ tickers, onSelect, placeholder }: TickerSearchPro
       />
 
       {isOpen && suggestions.length > 0 && (
-        <ul className="absolute z-10 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-gray-200 bg-white text-sm shadow-lg">
-          {suggestions.map((entry, i) => (
-            <li key={entry.ticker}>
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()} // keep input focus so onBlur doesn't fire first
-                onClick={() => pick(entry)}
-                className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left ${
-                  i === activeIndex ? 'bg-indigo-50' : 'hover:bg-gray-50'
-                }`}
-              >
-                <span className="font-medium text-gray-900">{entry.ticker}</span>
-                <span className="truncate text-gray-500">{entry.nom_affiche}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
+        <TickerSuggestionsList suggestions={suggestions} activeIndex={activeIndex} onPick={pick} />
       )}
 
       {isOpen && query.trim() && suggestions.length === 0 && (

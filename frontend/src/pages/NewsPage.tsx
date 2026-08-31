@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react'
-import { ApiError, fetchNews, fetchNewsNarrative, fetchStockDetail, fetchTickers } from '../api'
+import { ApiError, fetchNews, fetchNewsFacets, fetchNewsNarrative, fetchStockDetail, fetchTickers } from '../api'
 import { CompanyDescription } from '../components/CompanyDescription'
 import { DirectionFilter, dominantDirection } from '../components/DirectionFilter'
 import { DirectionProbabilityBar } from '../components/DirectionProbabilityBar'
 import { ExpandModal } from '../components/ExpandModal'
 import { MarkdownText } from '../components/MarkdownText'
 import { PriceHeadline } from '../components/PriceHeadline'
-import { TickerSearch } from '../components/TickerSearch'
+import { TickerSuggestionsList, useTickerSuggestions } from '../components/TickerSearch'
 import type {
   DirectionFilterValue,
   DirectionProbabilities,
+  NewsFacetsResponse,
   NewsItem,
   NewsNarrativeSource,
   NewsPriceContext,
@@ -42,13 +43,23 @@ type NewsState =
   | { status: 'error'; message: string }
   | { status: 'ready'; data: NewsResponse }
 
+type FacetsState =
+  | { status: 'loading' }
+  | { status: 'error' }
+  | { status: 'ready'; data: NewsFacetsResponse }
+
 type TickersState =
   | { status: 'loading' }
-  | { status: 'error'; message: string }
+  | { status: 'error' }
   | { status: 'ready'; tickers: TickerListEntry[] }
 
 // Matches the backend's own default (api/routers/news.py's DEFAULT_LIMIT).
 const PAGE_SIZE = 50
+
+// Same debounce window as CorrelationsPage.tsx's own free-text search --
+// long enough that typing a word fires ONE request instead of one per
+// character, short enough that the list still feels responsive.
+const SEARCH_DEBOUNCE_MS = 300
 
 const TONALITE_STYLES: Record<string, string> = {
   positive: 'bg-emerald-100 text-emerald-800',
@@ -92,13 +103,12 @@ const DIRECTION_BADGE_STYLES: Record<Exclude<DirectionFilterValue, 'toutes'>, st
 }
 
 function loadNews(
-  ticker: string | null,
+  filters: { ticker?: string; search?: string; sector: string; zone: string; direction: DirectionFilterValue },
   page: number,
-  direction: DirectionFilterValue,
   setState: (s: NewsState) => void,
 ) {
   setState({ status: 'loading' })
-  fetchNews(PAGE_SIZE, page * PAGE_SIZE, ticker ?? undefined, direction)
+  fetchNews(PAGE_SIZE, page * PAGE_SIZE, filters)
     .then((data) => setState({ status: 'ready', data }))
     .catch((err) => {
       const message =
@@ -107,43 +117,132 @@ function loadNews(
     })
 }
 
+function loadFacets(setState: (s: FacetsState) => void) {
+  setState({ status: 'loading' })
+  fetchNewsFacets()
+    .then((data) => setState({ status: 'ready', data }))
+    // Facets are a filter-building convenience, not core content -- a
+    // failure here degrades to "no sector/zone filter shown" rather than
+    // blocking the news list itself (search/direction still work fine).
+    .catch(() => setState({ status: 'error' }))
+}
+
 function loadTickers(setState: (s: TickersState) => void) {
   setState({ status: 'loading' })
   fetchTickers()
     .then((data) => setState({ status: 'ready', tickers: data.tickers }))
-    .catch((err) => {
-      const message =
-        err instanceof ApiError ? err.message : "Erreur inattendue lors du chargement de l'univers."
-      setState({ status: 'error', message })
-    })
+    // Same convenience-not-core-content convention as loadFacets: a
+    // failure here just means no ticker suggestions dropdown, never a
+    // blocked news list (free-text search keeps working regardless).
+    .catch(() => setState({ status: 'error' }))
 }
 
 export function NewsPage() {
-  const [tickersState, setTickersState] = useState<TickersState>({ status: 'loading' })
+  // `search` is what is in the input -- updated on every keystroke so the
+  // field stays responsive. `appliedSearch` is what has actually been sent
+  // to the API, updated only once typing pauses (debounce effect below) --
+  // same split as CorrelationsPage.tsx's own free-text search.
+  const [search, setSearch] = useState('')
+  const [appliedSearch, setAppliedSearch] = useState('')
+  // Set only by picking a ticker suggestion below -- while non-null, the
+  // fetch effect uses the backend's EXACT `ticker` filter instead of
+  // `search` (closer to the old ticker-only filter's precision: a
+  // suggestion click means "show me this ticker", not "find text
+  // resembling this ticker"). Cleared the moment the user types anything
+  // else, so free-text search resumes without a stale ticker lock.
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null)
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(-1)
+  const [sector, setSector] = useState('')
+  const [zone, setZone] = useState('')
   const [direction, setDirection] = useState<DirectionFilterValue>('toutes')
   const [page, setPage] = useState(0)
   const [newsState, setNewsState] = useState<NewsState>({ status: 'loading' })
+  const [facetsState, setFacetsState] = useState<FacetsState>({ status: 'loading' })
+  const [tickersState, setTickersState] = useState<TickersState>({ status: 'loading' })
 
   useEffect(() => {
+    loadFacets(setFacetsState)
     loadTickers(setTickersState)
   }, [])
 
-  // `direction` is applied server-side (see api.ts's fetchNews and
-  // api/routers/news.py's own `direction` param) -- this list genuinely
-  // paginates (hundreds of news across many pages), so a client-side
-  // filter would only narrow whatever page happens to be loaded.
-  useEffect(() => {
-    loadNews(selectedTicker, page, direction, setNewsState)
-  }, [selectedTicker, direction, page])
+  // Same substring-then-fuzzy matching TickerSearch itself uses -- reacts
+  // to the LIVE `search` value (not the debounced `appliedSearch`), since
+  // suggestions must appear while typing, not 300ms after.
+  const suggestions = useTickerSuggestions(
+    tickersState.status === 'ready' ? tickersState.tickers : [],
+    selectedTicker ? '' : search,
+  )
 
-  function handleSelectTicker(ticker: string) {
-    setSelectedTicker(ticker)
+  // Debounce: the pagination reset lives HERE rather than in the input's
+  // onChange so it is tied to the search actually being applied; React
+  // batches both setStates, so the fetch effect below still runs once.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setAppliedSearch(search)
+      setPage(0)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [search])
+
+  // ticker/search/sector/zone/direction are ALL applied server-side and
+  // combine (see api/routers/news.py's own get_news docstring) -- this
+  // list genuinely paginates (hundreds of news across many pages), so a
+  // client-side filter would only narrow whatever page happens to be
+  // loaded. `search` is omitted entirely once a suggestion has been picked
+  // (selectedTicker set) -- the input then just DISPLAYS "TICKER - Nom",
+  // it is no longer a free-text query to also send.
+  useEffect(() => {
+    const filters = selectedTicker
+      ? { ticker: selectedTicker, sector, zone, direction }
+      : { search: appliedSearch, sector, zone, direction }
+    loadNews(filters, page, setNewsState)
+  }, [selectedTicker, appliedSearch, sector, zone, direction, page])
+
+  function pickSuggestion(entry: TickerListEntry) {
+    setSearch(`${entry.ticker} - ${entry.nom_affiche}`)
+    setSelectedTicker(entry.ticker)
+    setShowSuggestions(false)
+    setActiveIndex(-1)
     setPage(0)
   }
 
-  function handleClearTicker() {
+  function handleSearchChange(next: string) {
+    setSearch(next)
+    // Any manual edit -- even editing text that still contains the
+    // previously-picked ticker -- exits "exact ticker" mode and returns to
+    // free-text search, per the task's own step 3.
     setSelectedTicker(null)
+    setShowSuggestions(true)
+    setActiveIndex(-1)
+  }
+
+  function handleSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (!showSuggestions || suggestions.length === 0) return
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setActiveIndex((i) => Math.min(i + 1, suggestions.length - 1))
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setActiveIndex((i) => Math.max(i - 1, 0))
+    } else if (e.key === 'Enter') {
+      if (activeIndex >= 0) {
+        e.preventDefault()
+        pickSuggestion(suggestions[activeIndex])
+      }
+    } else if (e.key === 'Escape') {
+      setShowSuggestions(false)
+      setActiveIndex(-1)
+    }
+  }
+
+  function handleSectorChange(next: string) {
+    setSector(next)
+    setPage(0)
+  }
+
+  function handleZoneChange(next: string) {
+    setZone(next)
     setPage(0)
   }
 
@@ -156,24 +255,103 @@ export function NewsPage() {
     <div>
       <h1 className="text-2xl font-bold text-gray-900">News &amp; Analyse IA</h1>
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        {tickersState.status === 'ready' && (
-          <TickerSearch
-            tickers={tickersState.tickers}
-            onSelect={handleSelectTicker}
-            placeholder="Filtrer par ticker (ex: AAPL)..."
+      <div className="mt-4">
+        <label htmlFor="news-search" className="mb-1 block text-sm font-medium text-gray-700">
+          Rechercher
+        </label>
+        {/* Free text across title/entreprise/secteur/zone/ticker (see
+            reasoning/analyze_news.py's filter_news_by_search), WITH a
+            ticker/entreprise suggestions dropdown layered on top (see
+            useTickerSuggestions) -- picking a suggestion narrows to that
+            exact ticker; typing past it (or ignoring the dropdown
+            entirely) keeps using the multi-field free-text search. */}
+        <div className="relative w-full max-w-md">
+          <input
+            id="news-search"
+            type="text"
+            value={search}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            onFocus={() => setShowSuggestions(true)}
+            onBlur={() => {
+              // Delay so a click on a suggestion registers before the list unmounts.
+              setTimeout(() => setShowSuggestions(false), 150)
+            }}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Titre, entreprise, secteur, zone, ticker (ex: Apple, Energie, Asie...)"
+            className="w-full rounded-md border border-gray-300 px-3 py-2 pr-20 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
           />
-        )}
-        {selectedTicker && (
-          <button
-            type="button"
-            onClick={handleClearTicker}
-            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50"
-          >
-            Toutes les news ({selectedTicker} -&gt; tout)
-          </button>
-        )}
+          {search && (
+            <button
+              type="button"
+              onClick={() => handleSearchChange('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-2 py-0.5 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+            >
+              Effacer
+            </button>
+          )}
+          {showSuggestions && !selectedTicker && suggestions.length > 0 && (
+            <TickerSuggestionsList suggestions={suggestions} activeIndex={activeIndex} onPick={pickSuggestion} />
+          )}
+        </div>
       </div>
+
+      {facetsState.status === 'ready' && facetsState.data.sectors.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <label htmlFor="news-sector" className="text-sm font-medium text-gray-700">
+            Secteur
+          </label>
+          {/* Native <select> (not buttons): 450+ distinct real sector
+              strings at last count -- see load_news_facets' own docstring
+              -- far too many for a button row, and a native select gets
+              free browser typeahead for that many options. */}
+          <select
+            id="news-sector"
+            value={sector}
+            onChange={(e) => handleSectorChange(e.target.value)}
+            className="rounded-md border border-gray-300 px-2 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          >
+            <option value="">Tous les secteurs</option>
+            {facetsState.data.sectors.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.value} ({s.count})
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {facetsState.status === 'ready' && facetsState.data.zones.length > 0 && (
+        <div className="mt-3">
+          <span className="mb-1 block text-sm font-medium text-gray-700">Zone geographique</span>
+          {/* Button row (not a dropdown): only a handful of distinct real
+              zone values at last count -- see load_news_facets' own
+              docstring -- small enough that buttons stay readable, same
+              pill style as DirectionFilter. */}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => handleZoneChange('')}
+              className={`rounded-full px-4 py-1.5 text-sm font-medium ${
+                zone === '' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              Toutes les zones
+            </button>
+            {facetsState.data.zones.map((z) => (
+              <button
+                key={z.value}
+                type="button"
+                onClick={() => handleZoneChange(z.value)}
+                className={`rounded-full px-4 py-1.5 text-sm font-medium ${
+                  zone === z.value ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                {z.value} ({z.count})
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="mt-3">
         <DirectionFilter value={direction} onChange={handleDirectionChange} />
@@ -195,7 +373,15 @@ export function NewsPage() {
           <p className="mt-1 text-sm">{newsState.message}</p>
           <button
             type="button"
-            onClick={() => loadNews(selectedTicker, page, direction, setNewsState)}
+            onClick={() =>
+              loadNews(
+                selectedTicker
+                  ? { ticker: selectedTicker, sector, zone, direction }
+                  : { search: appliedSearch, sector, zone, direction },
+                page,
+                setNewsState,
+              )
+            }
             className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
           >
             Reessayer
@@ -207,14 +393,17 @@ export function NewsPage() {
         <>
           <p className="mt-4 text-sm text-gray-500">
             {newsState.data.n_total} news analysee(s)
-            {newsState.data.ticker ? ` pour ${newsState.data.ticker}` : ''}, triees par date
+            {newsState.data.ticker ? ` pour ${newsState.data.ticker}` : ''}
+            {newsState.data.search ? ` pour « ${newsState.data.search} »` : ''}
+            {newsState.data.sector ? ` · secteur ${newsState.data.sector}` : ''}
+            {newsState.data.zone ? ` · zone ${newsState.data.zone}` : ''}, triees par date
             decroissante.
           </p>
 
           {newsState.data.news.length === 0 ? (
             <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
-              {newsState.data.ticker
-                ? `Aucune news analysee pour ${newsState.data.ticker}.`
+              {newsState.data.ticker || newsState.data.search || newsState.data.sector || newsState.data.zone
+                ? 'Aucune news ne correspond a ces filtres.'
                 : "Aucune news analysee pour l'instant. Lance ingestion/fetch_news.py puis reasoning/analyze_news.py."}
             </div>
           ) : (
@@ -254,10 +443,23 @@ export function NewsPage() {
   )
 }
 
+// Compact "[Secteur] Zone" badge next to tonalite/importance -- omitted
+// entirely (not "non renseigne" text) when both are empty, e.g. every
+// news_analysis row analysed before zone_geographique existed (see
+// reasoning/analyze_news.py's _ensure_zone_geographique_column: those
+// existing rows are never backfilled, just left NULL). Showing nothing is
+// less noisy than a "non renseigne" badge repeated on hundreds of older
+// cards, while new analyses do get it.
+function sectorZoneLabel(item: NewsItem): string | null {
+  const parts = [item.sector, item.zone_geographique].filter(Boolean)
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
 function NewsCard({ item }: { item: NewsItem }) {
-  const meta = [item.company, item.sector, item.horizon, item.source ? `source: ${item.source}` : null]
+  const meta = [item.company, item.horizon, item.source ? `source: ${item.source}` : null]
     .filter(Boolean)
     .join(' · ')
+  const sectorZone = sectorZoneLabel(item)
   const [expanded, setExpanded] = useState(false)
   const [stockState, setStockState] = useState<StockDetailState>({ status: 'loading' })
   const [narrative, setNarrative] = useState<NarrativeState>({ status: 'idle' })
@@ -308,6 +510,11 @@ function NewsCard({ item }: { item: NewsItem }) {
             className={`rounded-full px-2.5 py-1 text-xs font-medium ${DIRECTION_BADGE_STYLES[dominantDirection(item.direction_probabilities)]}`}
           >
             {DIRECTION_LABELS[dominantDirection(item.direction_probabilities)]}
+          </span>
+        )}
+        {sectorZone && (
+          <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700">
+            {sectorZone}
           </span>
         )}
         <button
