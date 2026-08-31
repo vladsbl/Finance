@@ -71,6 +71,32 @@ export interface DailySummaryResponse {
   staleness: string | null
 }
 
+// Mirrors api/routers/macro_context.py's GET /api/macro-context exactly.
+export interface MacroContextSourceItem {
+  source: string
+  title: string
+  url: string | null
+  published_at: string | null
+}
+
+export type MacroContextSource = 'cache' | 'generated' | 'unavailable'
+
+export interface MacroContextSecteur {
+  secteur: string
+  raison: string
+}
+
+export interface MacroContextResponse {
+  date: string
+  texte_court: string | null
+  texte_detaille: string | null
+  secteurs_a_surveiller: MacroContextSecteur[]
+  source: MacroContextSource
+  n_sources: number
+  window_hours: number
+  sources: MacroContextSourceItem[]
+}
+
 export type ArguedTextSource = 'cache' | 'generated' | 'unavailable'
 
 export interface ArguedTextResponse {

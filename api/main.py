@@ -61,6 +61,7 @@ from api.routers import (  # noqa: E402
     correlations,
     daily_summary,
     graph,
+    macro_context,
     news,
     opportunities,
     pipeline,
@@ -98,6 +99,7 @@ app.add_middleware(
 )
 
 app.include_router(daily_summary.router)
+app.include_router(macro_context.router)
 app.include_router(opportunities.router)
 app.include_router(stock.router)
 app.include_router(stock.tickers_router)

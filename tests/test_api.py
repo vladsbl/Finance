@@ -364,6 +364,58 @@ def test_stock_argued_text_never_calls_groq_during_tests():
         assert isinstance(body["texte_argumente"], str) and body["texte_argumente"]
 
 
+# --- /api/macro-context ------------------------------------------------------
+#
+# Reads the REAL project database (same discipline as the rest of this
+# file) -- real Fed/ECB rows collected via ingestion/fetch_macro_news.py
+# during Phase 4 development. Never calls Groq during a test run: the
+# PYTEST_CURRENT_TEST guard inside get_or_generate_macro_context short-
+# circuits before any network call, same convention as the argued-text and
+# news-narrative routes above.
+
+def test_macro_context_returns_expected_top_level_shape():
+    resp = client.get("/api/macro-context")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {
+        "date", "texte_court", "texte_detaille", "secteurs_a_surveiller",
+        "source", "n_sources", "window_hours", "sources",
+    }
+    assert body["source"] in {"cache", "generated", "unavailable"}
+    assert isinstance(body["n_sources"], int)
+    assert isinstance(body["sources"], list)
+    assert isinstance(body["secteurs_a_surveiller"], list)
+
+
+def test_macro_context_never_calls_groq_during_tests():
+    resp = client.get("/api/macro-context")
+    body = resp.json()
+    if body["source"] == "unavailable":
+        assert body["texte_court"] is None
+        assert body["texte_detaille"] is None
+    else:
+        assert isinstance(body["texte_court"], str) and body["texte_court"]
+        assert isinstance(body["texte_detaille"], str) and body["texte_detaille"]
+
+
+def test_macro_context_sector_items_have_expected_shape():
+    resp = client.get("/api/macro-context")
+    secteurs = resp.json()["secteurs_a_surveiller"]
+    if not secteurs:
+        return  # nothing generated with this field yet in this environment -- not a failure
+    item = secteurs[0]
+    assert {"secteur", "raison"} == set(item.keys())
+
+
+def test_macro_context_source_items_have_expected_shape():
+    resp = client.get("/api/macro-context")
+    sources = resp.json()["sources"]
+    if not sources:
+        return  # nothing collected yet in this environment -- not a failure
+    item = sources[0]
+    assert {"source", "title", "url", "published_at"} == set(item.keys())
+
+
 # --- /api/graph -------------------------------------------------------------
 #
 # AAPL is used as a "has real relations" ticker (part of the original

@@ -11,6 +11,7 @@ import type {
   DailySummaryResponse,
   DirectionFilterValue,
   GraphResponse,
+  MacroContextResponse,
   ManualRelation,
   ManualRelationsResponse,
   OpportunitesResponse,
@@ -90,6 +91,16 @@ export function fetchDailySummary(): Promise<DailySummaryResponse> {
 
 export function fetchArguedText(ticker: string): Promise<ArguedTextResponse> {
   return getJson<ArguedTextResponse>(`/daily-summary/${encodeURIComponent(ticker)}/argued-text`)
+}
+
+// --- /api/macro-context -----------------------------------------------------
+//
+// A GET here is what actually triggers generation on a cache miss (one
+// Groq call/day, cached server-side) -- same on-demand-via-GET convention
+// as fetchArguedText/fetchNewsNarrative above, no separate "generate"
+// button needed.
+export function fetchMacroContext(): Promise<MacroContextResponse> {
+  return getJson<MacroContextResponse>('/macro-context')
 }
 
 export function fetchOpportunites(

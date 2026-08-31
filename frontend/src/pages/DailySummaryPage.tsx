@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ApiError, fetchDailySummary } from '../api'
 import { DirectionFilter, dominantDirection } from '../components/DirectionFilter'
+import { MacroContextSection } from '../components/MacroContextSection'
 import { SignalCard } from '../components/SignalCard'
 import type { DailySummaryResponse, DirectionFilterValue } from '../types'
 
@@ -50,6 +51,8 @@ export function DailySummaryPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold text-gray-900">Resume du jour</h1>
+
+      <MacroContextSection />
 
       <div className="mt-4">
         <DirectionFilter value={direction} onChange={setDirection} />
