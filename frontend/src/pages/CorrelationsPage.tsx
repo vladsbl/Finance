@@ -32,8 +32,8 @@ const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
 
 const BADGE_STYLES: Record<CorrelationBadge['severity'], string> = {
-  warning: 'bg-amber-100 text-amber-800',
-  info: 'bg-blue-50 text-blue-700',
+  warning: 'bg-amber-400/15 text-amber-300',
+  info: 'bg-cyan-400/15 text-cyan-200',
 }
 
 const BADGE_LABELS: Record<CorrelationBadge['type'], string> = {
@@ -81,7 +81,7 @@ function describeRelation(correlation: Correlation): string {
 }
 
 function BadgePill({ badge }: { badge: Correlation['badge'] }) {
-  if (!badge) return <span className="text-gray-300">--</span>
+  if (!badge) return <span className="text-slate-600">--</span>
   return (
     <span
       title={badge.message}
@@ -143,9 +143,9 @@ export function CorrelationsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900">Correlations decouvertes</h1>
+      <h1 className="jarvis-title text-4xl font-bold">Correlations decouvertes</h1>
 
-      <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+      <div className="jarvis-banner-info mt-4 text-sm">
         Correlation statistique observee sur l'historique disponible -- <strong>ce n'est pas une
         preuve de causalite</strong>. Deux actions peuvent evoluer ensemble pour bien d'autres
         raisons qu'un lien economique direct : secteur commun, sentiment de marche general, ou
@@ -156,7 +156,7 @@ export function CorrelationsPage() {
       <div className="mt-6">
         <label
           htmlFor="correlation-search"
-          className="mb-1 block text-sm font-medium text-gray-700"
+          className="mb-1 block text-sm font-medium text-muted"
         >
           Rechercher une entreprise
         </label>
@@ -172,42 +172,39 @@ export function CorrelationsPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Nom d'entreprise (ex: Apple, Energy...)"
-            className="w-full rounded-md border border-gray-300 px-3 py-2 pr-20 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            className="w-full rounded-full border border-cyan-400/25 bg-navy-800/50 px-4 py-2 pr-20 text-sm text-ink placeholder:text-faint backdrop-blur-md transition-all focus:border-cyan-300/70 focus:outline-none focus:ring-1 focus:ring-cyan-300/50"
           />
           {search && (
             <button
               type="button"
               onClick={() => setSearch('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-2 py-0.5 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full px-2 py-0.5 text-xs font-medium text-faint hover:bg-white/10 hover:text-ink"
             >
               Effacer
             </button>
           )}
         </div>
-        <p className="mt-1 text-xs text-gray-500">
+        <p className="mt-1 text-xs text-faint">
           Recherche sur le NOM de l'entreprise (partielle, insensible a la casse) : affiche les
           paires dont l'une des deux entreprises correspond.
         </p>
       </div>
 
       {state.status === 'loading' && (
-        <div className="mt-8 flex items-center gap-3 text-gray-600">
-          <span
-            className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-            aria-hidden="true"
-          />
+        <div className="mt-8 flex items-center gap-3 text-faint">
+          <span className="jarvis-spinner h-5 w-5 animate-spin" aria-hidden="true" />
           Chargement des correlations...
         </div>
       )}
 
       {state.status === 'error' && (
-        <div className="mt-8 rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+        <div className="jarvis-banner-error mt-8">
           <p className="font-medium">Impossible de charger les correlations.</p>
           <p className="mt-1 text-sm">{state.message}</p>
           <button
             type="button"
             onClick={() => setReloadKey((k) => k + 1)}
-            className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+            className="jarvis-pill-danger mt-3"
           >
             Reessayer
           </button>
@@ -216,7 +213,7 @@ export function CorrelationsPage() {
 
       {state.status === 'ready' && (
         <>
-          <p className="mt-4 text-sm text-gray-500">
+          <p className="mt-4 text-sm text-faint">
             {state.data.search ? (
               <>
                 {state.data.n_total} paire(s) impliquant une entreprise dont le nom contient
@@ -236,7 +233,7 @@ export function CorrelationsPage() {
 
           {state.data.correlations.length === 0 ? (
             state.data.search ? (
-              <div className="mt-8 rounded-md border border-amber-200 bg-amber-50 p-4 text-amber-900">
+              <div className="jarvis-banner-warning mt-8">
                 <p className="font-medium">
                   Aucune paire ne correspond a &laquo;&nbsp;{state.data.search}&nbsp;&raquo;.
                 </p>
@@ -248,54 +245,54 @@ export function CorrelationsPage() {
                 <button
                   type="button"
                   onClick={() => setSearch('')}
-                  className="mt-3 rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700"
+                  className="jarvis-pill mt-3"
                 >
                   Effacer la recherche
                 </button>
               </div>
             ) : (
-              <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+              <div className="jarvis-empty mt-8">
                 Aucune correlation calculee pour l'instant.
               </div>
             )
           ) : (
-            <div className="mt-4 overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200 text-sm">
+            <div className="jarvis-card mt-4 overflow-x-auto p-2">
+              <table className="min-w-full divide-y divide-cyan-400/10 text-sm">
                 <thead>
-                  <tr className="text-left text-gray-500">
-                    <th className="py-2 pr-4">Paire</th>
-                    <th className="py-2 pr-4">Relation d'origine</th>
-                    <th className="py-2 pr-4">Coefficient</th>
-                    <th className="py-2 pr-4">P-value corrigee</th>
-                    <th className="py-2 pr-4">Lag</th>
-                    <th className="py-2 pr-4">Observations</th>
-                    <th className="py-2 pr-4">Note</th>
+                  <tr className="text-left text-faint">
+                    <th className="px-2 py-2">Paire</th>
+                    <th className="px-2 py-2">Relation d'origine</th>
+                    <th className="px-2 py-2">Coefficient</th>
+                    <th className="px-2 py-2">P-value corrigee</th>
+                    <th className="px-2 py-2">Lag</th>
+                    <th className="px-2 py-2">Observations</th>
+                    <th className="px-2 py-2">Note</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
+                <tbody className="divide-y divide-cyan-400/5">
                   {state.data.correlations.map((c) => (
                     <tr
                       key={c.id}
                       onClick={() => setExpanded(c)}
-                      className="cursor-pointer align-top hover:bg-gray-50"
+                      className="cursor-pointer align-top transition-colors hover:bg-white/5"
                       title="Cliquer pour agrandir la comparaison"
                     >
-                      <td className="py-2 pr-4">
-                        <div className="font-medium text-gray-900">
+                      <td className="px-2 py-2">
+                        <div className="jarvis-metric font-medium text-cyan-200">
                           {c.ticker_source} &harr; {c.ticker_target}
                         </div>
-                        <div className="text-xs text-gray-500">
+                        <div className="text-xs text-faint">
                           {c.nom_source} &harr; {c.nom_target}
                         </div>
                       </td>
-                      <td className="py-2 pr-4 text-gray-600">{c.relation_type}</td>
-                      <td className="py-2 pr-4 font-semibold text-gray-900">
+                      <td className="px-2 py-2 text-ink/70">{c.relation_type}</td>
+                      <td className="jarvis-metric px-2 py-2 font-semibold text-ink">
                         {formatCoefficient(c.coefficient)}
                       </td>
-                      <td className="py-2 pr-4 text-gray-600">{formatPValue(c.p_value_corrigee)}</td>
-                      <td className="py-2 pr-4 text-gray-600">{c.lag_label}</td>
-                      <td className="py-2 pr-4 text-gray-600">{c.n_observations}</td>
-                      <td className="py-2 pr-4">
+                      <td className="jarvis-metric px-2 py-2 text-ink/70">{formatPValue(c.p_value_corrigee)}</td>
+                      <td className="px-2 py-2 text-ink/70">{c.lag_label}</td>
+                      <td className="jarvis-metric px-2 py-2 text-ink/70">{c.n_observations}</td>
+                      <td className="px-2 py-2">
                         <BadgePill badge={c.badge} />
                       </td>
                     </tr>
@@ -306,12 +303,12 @@ export function CorrelationsPage() {
           )}
 
           {state.data.n_total > 0 && (
-            <div className="mt-4 flex items-center justify-between text-sm text-gray-600">
+            <div className="mt-4 flex items-center justify-between text-sm text-faint">
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.max(0, p - 1))}
                 disabled={page === 0}
-                className="rounded-md border border-gray-300 px-3 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-gray-50"
+                className="jarvis-pill"
               >
                 Precedent
               </button>
@@ -322,7 +319,7 @@ export function CorrelationsPage() {
                 type="button"
                 onClick={() => setPage((p) => p + 1)}
                 disabled={(page + 1) * PAGE_SIZE >= state.data.n_total}
-                className="rounded-md border border-gray-300 px-3 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-gray-50"
+                className="jarvis-pill"
               >
                 Suivant
               </button>
@@ -440,13 +437,13 @@ function CorrelationComparison({ correlation }: { correlation: Correlation }) {
     <div className="flex flex-col gap-6">
       {/* The relation type, plain-French and up front -- readable at a
           glance instead of buried in the table's raw relation_type column. */}
-      <p className="rounded-md bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-900">
+      <p className="rounded-2xl bg-cyan-400/10 px-3 py-2 text-sm font-medium text-cyan-100">
         {describeRelation(correlation)}
       </p>
 
       {/* Correlation metrics, in large -- the reason these two tickers are
           being compared in the first place. */}
-      <div className="grid grid-cols-2 gap-4 rounded-md bg-gray-50 p-4 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 rounded-2xl border border-cyan-400/10 bg-white/5 p-4 sm:grid-cols-4">
         <Metric label="Coefficient (Spearman)" value={formatCoefficient(correlation.coefficient)} />
         <Metric label="P-value corrigee" value={formatPValue(correlation.p_value_corrigee)} />
         <Metric label="Lag" value={correlation.lag_label} small />
@@ -454,10 +451,10 @@ function CorrelationComparison({ correlation }: { correlation: Correlation }) {
       </div>
       {correlation.badge && (
         <p
-          className={`-mt-3 rounded-md px-3 py-2 text-sm ${
+          className={`-mt-3 rounded-2xl px-3 py-2 text-sm ${
             correlation.badge.severity === 'warning'
-              ? 'bg-amber-50 text-amber-800'
-              : 'bg-blue-50 text-blue-700'
+              ? 'bg-amber-400/15 text-amber-300'
+              : 'bg-cyan-400/15 text-cyan-200'
           }`}
         >
           {correlation.badge.severity === 'warning' ? '⚠' : 'ℹ'} {correlation.badge.message}
@@ -472,17 +469,17 @@ function CorrelationComparison({ correlation }: { correlation: Correlation }) {
 
       {/* Comparative price chart. */}
       <div>
-        <h3 className="mb-2 text-sm font-semibold text-gray-900">
+        <h3 className="jarvis-heading mb-2 text-sm font-bold">
           Evolution comparee du prix (% depuis le premier jour commun)
         </h3>
         {chartState.status === 'loading' && (
-          <p className="text-sm text-gray-500">Chargement du graphique...</p>
+          <p className="text-sm text-faint">Chargement du graphique...</p>
         )}
         {chartState.status === 'error' && (
-          <p className="text-sm text-red-600">{chartState.message}</p>
+          <p className="text-sm text-red-400">{chartState.message}</p>
         )}
         {chartState.status === 'unavailable' && (
-          <p className="text-sm text-gray-500">
+          <p className="text-sm text-faint">
             Historique de prix insuffisant en commun entre {correlation.ticker_source} et{' '}
             {correlation.ticker_target} pour un graphique comparatif.
           </p>
@@ -491,20 +488,26 @@ function CorrelationComparison({ correlation }: { correlation: Correlation }) {
           <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartState.points} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={40} />
+                <CartesianGrid strokeDasharray="3 3" stroke="#22d3ee" strokeOpacity={0.12} />
+                <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#7c93ad' }} minTickGap={40} stroke="#22d3ee" strokeOpacity={0.2} />
                 <YAxis
-                  tick={{ fontSize: 11 }}
+                  tick={{ fontSize: 11, fill: '#7c93ad' }}
                   width={50}
+                  stroke="#22d3ee"
+                  strokeOpacity={0.2}
                   tickFormatter={(v: number) => `${v.toFixed(0)}%`}
                 />
-                <Tooltip formatter={(v: number) => `${v.toFixed(1)}%`} />
-                <Legend />
+                <Tooltip
+                  formatter={(v: number) => `${v.toFixed(1)}%`}
+                  contentStyle={{ background: '#0d1520', border: '1px solid rgba(34,211,238,0.3)', borderRadius: 12, fontSize: 12 }}
+                  labelStyle={{ color: '#8ec9f2' }}
+                />
+                <Legend wrapperStyle={{ fontSize: 12, color: '#8ec9f2' }} />
                 <Line
                   type="monotone"
                   dataKey="source"
                   name={correlation.ticker_source}
-                  stroke="#4f46e5"
+                  stroke="#5fe3ff"
                   dot={false}
                   strokeWidth={1.8}
                   connectNulls
@@ -513,7 +516,7 @@ function CorrelationComparison({ correlation }: { correlation: Correlation }) {
                   type="monotone"
                   dataKey="target"
                   name={correlation.ticker_target}
-                  stroke="#f59e0b"
+                  stroke="#fbbf24"
                   dot={false}
                   strokeWidth={1.8}
                   connectNulls
@@ -530,8 +533,8 @@ function CorrelationComparison({ correlation }: { correlation: Correlation }) {
 function Metric({ label, value, small }: { label: string; value: string; small?: boolean }) {
   return (
     <div>
-      <span className="text-xs text-gray-500">{label}</span>
-      <p className={small ? 'text-sm font-semibold text-gray-900' : 'text-xl font-semibold text-gray-900'}>
+      <span className="text-xs text-faint">{label}</span>
+      <p className={`jarvis-metric ${small ? 'text-sm font-semibold text-ink' : 'text-xl font-semibold text-ink'}`}>
         {value}
       </p>
     </div>
@@ -548,13 +551,13 @@ function CompanyPanel({
   state: DetailState
 }) {
   return (
-    <div className="rounded-md border border-gray-200 p-4">
-      <h3 className="text-base font-semibold text-gray-900">
-        {ticker} <span className="font-normal text-gray-500">-- {nom}</span>
+    <div className="rounded-2xl border border-cyan-400/15 p-4">
+      <h3 className="jarvis-heading text-base font-bold">
+        {ticker} <span className="font-normal text-faint">-- {nom}</span>
       </h3>
 
-      {state.status === 'loading' && <p className="mt-2 text-sm text-gray-500">Chargement...</p>}
-      {state.status === 'error' && <p className="mt-2 text-sm text-red-600">{state.message}</p>}
+      {state.status === 'loading' && <p className="mt-2 text-sm text-faint">Chargement...</p>}
+      {state.status === 'error' && <p className="mt-2 text-sm text-red-400">{state.message}</p>}
 
       {state.status === 'ready' && (
         <div className="mt-2 flex flex-col gap-2 text-sm">
@@ -566,7 +569,7 @@ function CompanyPanel({
             variationPct={state.data.variations ? state.data.variations['1j'] : null}
           />
           {state.data.variations && (
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-faint">
               7j: {formatVariation(state.data.variations['7j'])} - 30j:{' '}
               {formatVariation(state.data.variations['30j'])}
             </p>
@@ -589,8 +592,8 @@ function CompanyPanel({
 function ScoreCell({ label, value, suffix }: { label: string; value: number | null; suffix?: string }) {
   return (
     <div>
-      <span className="text-xs text-gray-500">{label}</span>
-      <p className="font-medium text-gray-900">{value === null ? 'n/a' : `${value.toFixed(0)}${suffix ?? ''}`}</p>
+      <span className="text-xs text-faint">{label}</span>
+      <p className="jarvis-metric font-medium text-ink">{value === null ? 'n/a' : `${value.toFixed(0)}${suffix ?? ''}`}</p>
     </div>
   )
 }

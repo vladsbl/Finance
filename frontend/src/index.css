@@ -1,8 +1,131 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600;700;800&family=Share+Tech+Mono&display=swap');
 
-/* Deliberately minimal for this first page: mechanics before style (see
-   task instructions -- the full "Jarvis" theme from the Streamlit
-   dashboard comes later, once the React <-> FastAPI plumbing is proven). */
+/* "Jarvis" theme -- ported 1:1 from the Streamlit dashboard's own already-
+   validated dark/neon reskin (dashboard/style.css + .streamlit/config.toml)
+   so the React frontend reads as the same product, not a different app.
+   Palette: deep navy background (never pure black), electric-cyan accents,
+   Orbitron for display/headings, Share Tech Mono for numeric metrics. */
+@theme {
+  --color-navy-950: #05070a;
+  --color-navy-900: #0a0e14;
+  --color-navy-800: #0d1520;
+  --color-surface: #111a26;
+  --color-ink: #dce8f5;
+  --color-muted: #8ec9f2;
+  --color-faint: #7c93ad;
+  --color-glow: #5fe3ff;
+
+  --font-display: 'Orbitron', sans-serif;
+  --font-metric: 'Share Tech Mono', monospace;
+}
+
 body {
   margin: 0;
+  background: radial-gradient(ellipse at top, var(--color-navy-800) 0%, var(--color-navy-950) 70%) fixed;
+  color: var(--color-ink);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Reusable "Jarvis" building blocks -- glass surfaces, glow-pill controls,
+   the display-font title treatment -- so every page/component composes
+   these instead of re-deriving the same glow/blur values by hand. */
+@layer components {
+  /* Page title (h1): large, bold, Orbitron, soft cyan glow -- the "Apple-
+     style" display treatment the task asked for, matching the Streamlit
+     theme's own h1/h2/h3 rule in dashboard/style.css. */
+  .jarvis-title {
+    font-family: var(--font-display);
+    letter-spacing: 0.02em;
+    color: var(--color-glow);
+    text-shadow: 0 0 10px rgba(95, 227, 255, 0.45), 0 0 2px rgba(95, 227, 255, 0.7);
+  }
+
+  /* Section/card heading (h2/h3): same display font and glow family, one
+     step down in size/emphasis from the page title. */
+  .jarvis-heading {
+    font-family: var(--font-display);
+    letter-spacing: 0.01em;
+    color: var(--color-glow);
+    text-shadow: 0 0 6px rgba(95, 227, 255, 0.3);
+  }
+
+  /* Glass card: the base surface for every panel/section (SignalCard,
+     ExpandModal's own inner panel style follows the same recipe, page
+     sections, etc). */
+  .jarvis-card {
+    @apply rounded-2xl border border-cyan-400/20 bg-surface/60 shadow-[0_0_20px_rgba(34,211,238,0.07),inset_0_0_24px_rgba(34,211,238,0.03)] backdrop-blur-md;
+  }
+
+  /* Pill button/nav-link, inactive state: translucent glass, brightens on
+     hover with a cyan glow -- the "luminous pill" style the task asked for,
+     inspired by a translucent icon bar. */
+  .jarvis-pill {
+    @apply inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-cyan-400/20 bg-navy-800/50 px-4 py-1.5 text-sm font-medium text-ink/70 backdrop-blur-md transition-all duration-150;
+  }
+  .jarvis-pill:hover:not(:disabled) {
+    @apply border-cyan-300/60 text-white shadow-[0_0_16px_rgba(34,211,238,0.35)];
+  }
+  .jarvis-pill:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+
+  /* Pill button, active/selected state (current filter, current nav tab). */
+  .jarvis-pill-active {
+    @apply border-cyan-300/80 bg-cyan-400/15 text-white shadow-[0_0_18px_rgba(34,211,238,0.4)];
+  }
+
+  /* Primary "do something" pill (Recalculer maintenant, Generer l'analyse,
+     Ajouter...) -- brighter/more saturated than a plain filter pill so it
+     reads as the one actionable control among a row of toggles. */
+  .jarvis-pill-primary {
+    @apply inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-cyan-300/50 bg-gradient-to-br from-cyan-500/25 to-blue-600/25 px-4 py-2 text-sm font-medium text-cyan-100 backdrop-blur-md transition-all duration-150 shadow-[0_0_14px_rgba(34,211,238,0.18)];
+  }
+  .jarvis-pill-primary:hover:not(:disabled) {
+    @apply border-cyan-200 text-white shadow-[0_0_22px_rgba(34,211,238,0.5)];
+  }
+  .jarvis-pill-primary:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  /* Numeric metric (price, score, percentage): monospace, slightly glowing
+     -- mirrors dashboard/style.css's stMetricValue rule. */
+  .jarvis-metric {
+    font-family: var(--font-metric);
+  }
+
+  /* Loading spinner ring -- every page/component's own "Chargement..."
+     indicator uses this exact ring so a loading state always reads as the
+     same control across the app. */
+  .jarvis-spinner {
+    @apply rounded-full border-2 border-cyan-400/20 border-t-cyan-400;
+  }
+
+  /* Status banners: error / warning / info -- one shared recipe per
+     severity so every page's error/staleness/hint message looks like the
+     same family of control instead of each page inventing its own shade. */
+  .jarvis-banner-error {
+    @apply rounded-2xl border border-red-400/25 bg-red-500/10 p-4 text-red-300;
+  }
+  .jarvis-banner-warning {
+    @apply rounded-2xl border border-amber-400/25 bg-amber-500/10 p-3 text-amber-300;
+  }
+  .jarvis-banner-info {
+    @apply rounded-2xl border border-cyan-400/25 bg-cyan-500/10 p-4 text-cyan-100;
+  }
+
+  /* Empty-state box (no results, nothing computed yet). */
+  .jarvis-empty {
+    @apply rounded-2xl border border-cyan-400/15 bg-white/5 p-4 text-faint;
+  }
+
+  /* Destructive/retry action pill (the "Reessayer" button inside an error
+     banner) -- red-tinted variant of .jarvis-pill-primary. */
+  .jarvis-pill-danger {
+    @apply inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-red-400/40 bg-red-500/15 px-4 py-2 text-sm font-medium text-red-200 backdrop-blur-md transition-all duration-150;
+  }
+  .jarvis-pill-danger:hover:not(:disabled) {
+    @apply border-red-300 text-white shadow-[0_0_18px_rgba(248,113,113,0.35)];
+  }
 }

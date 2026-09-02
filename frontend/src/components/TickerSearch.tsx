@@ -65,7 +65,7 @@ export function TickerSuggestionsList({
   onPick: (entry: TickerListEntry) => void
 }) {
   return (
-    <ul className="absolute z-10 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-gray-200 bg-white text-sm shadow-lg">
+    <ul className="absolute z-10 mt-1 max-h-72 w-full overflow-y-auto rounded-xl border border-cyan-400/25 bg-navy-900/95 text-sm shadow-2xl backdrop-blur-md">
       {suggestions.map((entry, i) => (
         <li key={entry.ticker}>
           <button
@@ -73,11 +73,11 @@ export function TickerSuggestionsList({
             onMouseDown={(e) => e.preventDefault()} // keep input focus so onBlur doesn't fire first
             onClick={() => onPick(entry)}
             className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left ${
-              i === activeIndex ? 'bg-indigo-50' : 'hover:bg-gray-50'
+              i === activeIndex ? 'bg-cyan-400/15' : 'hover:bg-white/5'
             }`}
           >
-            <span className="font-medium text-gray-900">{entry.ticker}</span>
-            <span className="truncate text-gray-500">{entry.nom_affiche}</span>
+            <span className="jarvis-metric font-medium text-cyan-200">{entry.ticker}</span>
+            <span className="truncate text-faint">{entry.nom_affiche}</span>
           </button>
         </li>
       ))}
@@ -136,7 +136,7 @@ export function TickerSearch({ tickers, onSelect, placeholder }: TickerSearchPro
           setTimeout(() => setIsOpen(false), 150)
         }}
         onKeyDown={handleKeyDown}
-        className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+        className="w-full rounded-full border border-cyan-400/25 bg-navy-800/50 px-4 py-2 text-sm text-ink placeholder:text-faint backdrop-blur-md transition-all focus:border-cyan-300/70 focus:outline-none focus:ring-1 focus:ring-cyan-300/50"
       />
 
       {isOpen && suggestions.length > 0 && (
@@ -144,7 +144,7 @@ export function TickerSearch({ tickers, onSelect, placeholder }: TickerSearchPro
       )}
 
       {isOpen && query.trim() && suggestions.length === 0 && (
-        <div className="absolute z-10 mt-1 w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-sm text-gray-500 shadow-lg">
+        <div className="absolute z-10 mt-1 w-full rounded-xl border border-cyan-400/25 bg-navy-900/95 px-3 py-2 text-sm text-faint shadow-2xl backdrop-blur-md">
           Aucun resultat pour « {query} ».
         </div>
       )}

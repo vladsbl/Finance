@@ -53,9 +53,9 @@ export function CompanyDescription({ ticker }: { ticker: string }) {
   if (state.status === 'ready' && !state.description) return null
 
   return (
-    <p className="text-sm text-gray-700">
+    <p className="text-sm text-ink/80">
       {state.status === 'loading' ? (
-        <span className="italic text-gray-400">Chargement de la description...</span>
+        <span className="italic text-faint">Chargement de la description...</span>
       ) : (
         state.description
       )}

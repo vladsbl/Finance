@@ -156,20 +156,20 @@ export function StockPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900">Analyse d'une action</h1>
+      <h1 className="jarvis-title text-4xl font-bold">Analyse d'une action</h1>
 
       <div className="mt-4">
         {tickersState.status === 'loading' && (
-          <p className="text-sm text-gray-500">Chargement de l'univers des tickers...</p>
+          <p className="text-sm text-faint">Chargement de l'univers des tickers...</p>
         )}
         {tickersState.status === 'error' && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+          <div className="jarvis-banner-error">
             <p className="font-medium">Impossible de charger la liste des tickers.</p>
             <p className="mt-1 text-sm">{tickersState.message}</p>
             <button
               type="button"
               onClick={() => loadTickers(setTickersState)}
-              className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              className="jarvis-pill-danger mt-3"
             >
               Reessayer
             </button>
@@ -181,29 +181,26 @@ export function StockPage() {
       </div>
 
       {!selectedTicker && (
-        <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+        <div className="jarvis-empty mt-8">
           Recherchez un ticker ou une entreprise ci-dessus pour afficher son analyse.
         </div>
       )}
 
       {selectedTicker && detailState?.status === 'loading' && (
-        <div className="mt-8 flex items-center gap-3 text-gray-600">
-          <span
-            className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-            aria-hidden="true"
-          />
+        <div className="mt-8 flex items-center gap-3 text-faint">
+          <span className="jarvis-spinner h-5 w-5 animate-spin" aria-hidden="true" />
           Chargement de {selectedTicker}...
         </div>
       )}
 
       {selectedTicker && detailState?.status === 'error' && (
-        <div className="mt-8 rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+        <div className="jarvis-banner-error mt-8">
           <p className="font-medium">Impossible de charger {selectedTicker}.</p>
           <p className="mt-1 text-sm">{detailState.message}</p>
           <button
             type="button"
             onClick={() => loadDetail(selectedTicker, setDetailState)}
-            className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+            className="jarvis-pill-danger mt-3"
           >
             Reessayer
           </button>
@@ -241,18 +238,18 @@ function StockDetailView({
 }) {
   return (
     <div className="mt-6 flex flex-col gap-6">
-      <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+      <div className="jarvis-card p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-lg font-semibold text-gray-900">
-            {detail.ticker} <span className="font-normal text-gray-500">-- {detail.nom_affiche}</span>
+          <h2 className="jarvis-heading text-xl font-bold">
+            {detail.ticker} <span className="font-normal text-faint">-- {detail.nom_affiche}</span>
           </h2>
-          <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700">
+          <span className="rounded-full bg-white/10 px-3 py-1 text-sm font-medium text-ink/80">
             Priorite : {detail.priorite}
           </span>
         </div>
 
         {(detail.sector || detail.industry) && (
-          <p className="mt-1 text-sm text-gray-500">
+          <p className="mt-1 text-sm text-faint">
             {[detail.sector, detail.industry].filter(Boolean).join(' - ')}
           </p>
         )}
@@ -270,7 +267,7 @@ function StockDetailView({
             variationPct={detail.variations ? detail.variations['1j'] : null}
           />
           {detail.variations && (
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-faint">
               7j: {fmtVariation(detail.variations['7j'])} - 30j:{' '}
               {fmtVariation(detail.variations['30j'])}
             </p>
@@ -279,13 +276,13 @@ function StockDetailView({
 
         {/* Direction probabilities -- THE main forward-looking number now,
             ahead of the older secondary scores below. */}
-        <div className="mt-4 border-t border-gray-100 pt-4">
+        <div className="mt-4 border-t border-cyan-400/15 pt-4">
           <DirectionProbabilityBar direction={detail.direction_probabilities} />
         </div>
 
         {/* Secondary scores -- smaller, below the price and the direction
             probabilities, kept for anyone who wants the structured detail. */}
-        <div className="mt-4 grid grid-cols-2 gap-3 border-t border-gray-100 pt-4 text-xs sm:grid-cols-4">
+        <div className="mt-4 grid grid-cols-2 gap-3 border-t border-cyan-400/15 pt-4 text-xs sm:grid-cols-4">
           <ScoreStat label="Confiance" value={detail.confidence} />
           <ScoreStat label="RSI" value={detail.rsi} suffix={detail.rsi !== null && !detail.rsi_is_real ? ' (estime)' : ''} />
           <ScoreStat label="Prix / Valorisation" value={detail.price_valuation_score} />
@@ -299,36 +296,33 @@ function StockDetailView({
         </div>
       </div>
 
-      <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-        <h3 className="text-base font-semibold text-gray-900">Prix &amp; moyennes mobiles</h3>
+      <div className="jarvis-card p-5">
+        <h3 className="jarvis-heading text-base font-bold">Prix &amp; moyennes mobiles</h3>
         <StockChartView chartState={chartState} />
       </div>
 
-      <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-        <h3 className="text-base font-semibold text-gray-900">Analyse argumentee (IA)</h3>
+      <div className="jarvis-card p-5">
+        <h3 className="jarvis-heading text-base font-bold">Analyse argumentee (IA)</h3>
         <div className="mt-3">
           {arguedText.status === 'idle' && (
             <button
               type="button"
               onClick={onGenerateArguedText}
-              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+              className="jarvis-pill-primary"
             >
               Generer l'analyse
             </button>
           )}
 
           {arguedText.status === 'loading' && (
-            <div className="flex items-center gap-2 text-sm text-gray-500">
-              <span
-                className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-                aria-hidden="true"
-              />
+            <div className="flex items-center gap-2 text-sm text-faint">
+              <span className="jarvis-spinner h-4 w-4 animate-spin" aria-hidden="true" />
               Generation en cours...
             </div>
           )}
 
           {arguedText.status === 'error' && (
-            <div className="text-sm text-red-600">
+            <div className="text-sm text-red-400">
               {arguedText.message}
               <button
                 type="button"
@@ -342,15 +336,15 @@ function StockDetailView({
 
           {arguedText.status === 'done' && arguedText.texte && (
             <div>
-              <p className="whitespace-pre-line text-sm text-gray-800">{arguedText.texte}</p>
-              <p className="mt-2 text-xs text-gray-400">
+              <p className="whitespace-pre-line text-sm text-ink/80">{arguedText.texte}</p>
+              <p className="mt-2 text-xs text-slate-500">
                 {arguedText.source === 'cache' ? 'Depuis le cache du jour' : "Generee a l'instant"}
               </p>
             </div>
           )}
 
           {arguedText.status === 'done' && !arguedText.texte && (
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-faint">
               Analyse indisponible pour l'instant (quota Groq du jour atteint, cle API absente, ou
               erreur reseau cote serveur, ou {detail.ticker} n'a pas de donnee d'opportunite).
             </p>
@@ -358,8 +352,8 @@ function StockDetailView({
         </div>
       </div>
 
-      <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-        <h3 className="text-base font-semibold text-gray-900">Sources</h3>
+      <div className="jarvis-card p-5">
+        <h3 className="jarvis-heading text-base font-bold">Sources</h3>
         <NewsSourcesSection
           ticker={detail.ticker}
           newsSources={newsSources}
@@ -381,11 +375,8 @@ function NewsSourcesSection({
 }) {
   if (!newsSources || newsSources.status === 'loading') {
     return (
-      <div className="mt-3 flex items-center gap-2 text-sm text-gray-500">
-        <span
-          className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-          aria-hidden="true"
-        />
+      <div className="mt-3 flex items-center gap-2 text-sm text-faint">
+        <span className="jarvis-spinner h-4 w-4 animate-spin" aria-hidden="true" />
         Chargement des sources...
       </div>
     )
@@ -393,7 +384,7 @@ function NewsSourcesSection({
 
   if (newsSources.status === 'error') {
     return (
-      <div className="mt-3 text-sm text-red-600">
+      <div className="mt-3 text-sm text-red-400">
         {newsSources.message}
         <button
           type="button"
@@ -408,7 +399,7 @@ function NewsSourcesSection({
 
   if (newsSources.news.length === 0) {
     return (
-      <p className="mt-3 text-sm text-gray-500">
+      <p className="mt-3 text-sm text-faint">
         Aucune news analysee pour {ticker} pour l'instant -- pas de source disponible.
       </p>
     )
@@ -423,14 +414,14 @@ function NewsSourcesSection({
               href={item.url}
               target="_blank"
               rel="noreferrer"
-              className="text-indigo-700 hover:underline"
+              className="text-cyan-300 hover:underline"
             >
               {item.title}
             </a>
           ) : (
-            <span className="text-gray-700">{item.title}</span>
+            <span className="text-ink/80">{item.title}</span>
           )}
-          <span className="ml-2 text-xs text-gray-400">
+          <span className="ml-2 text-xs text-slate-500">
             {(item.published_at || '').slice(0, 10)}
             {item.source ? ` -- ${item.source}` : ''}
           </span>
@@ -453,8 +444,8 @@ function ScoreStat({
 }) {
   return (
     <div>
-      <span className="text-gray-500">{label}</span>
-      <p className="text-sm font-semibold text-gray-900">
+      <span className="text-faint">{label}</span>
+      <p className="jarvis-metric text-sm font-semibold text-ink">
         {fmt(value, decimals)}
         {suffix}
       </p>
@@ -465,24 +456,21 @@ function ScoreStat({
 function StockChartView({ chartState }: { chartState: ChartState | null }) {
   if (!chartState || chartState.status === 'loading') {
     return (
-      <div className="mt-4 flex items-center gap-2 text-sm text-gray-500">
-        <span
-          className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-          aria-hidden="true"
-        />
+      <div className="mt-4 flex items-center gap-2 text-sm text-faint">
+        <span className="jarvis-spinner h-4 w-4 animate-spin" aria-hidden="true" />
         Chargement du graphique...
       </div>
     )
   }
 
   if (chartState.status === 'error') {
-    return <p className="mt-4 text-sm text-red-600">{chartState.message}</p>
+    return <p className="mt-4 text-sm text-red-400">{chartState.message}</p>
   }
 
   const { points, devise_affichee } = chartState.data
   if (points.length === 0) {
     return (
-      <p className="mt-4 text-sm text-gray-500">
+      <p className="mt-4 text-sm text-faint">
         Aucun historique de prix pour ce ticker pour l'instant.
       </p>
     )
@@ -492,29 +480,34 @@ function StockChartView({ chartState }: { chartState: ChartState | null }) {
     <div className="mt-4 h-80 w-full">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={points} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-          <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={40} />
+          <CartesianGrid strokeDasharray="3 3" stroke="#22d3ee" strokeOpacity={0.12} />
+          <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#7c93ad' }} minTickGap={40} stroke="#22d3ee" strokeOpacity={0.2} />
           <YAxis
-            tick={{ fontSize: 11 }}
+            tick={{ fontSize: 11, fill: '#7c93ad' }}
             width={60}
-            label={{ value: devise_affichee, angle: -90, position: 'insideLeft', fontSize: 11 }}
+            stroke="#22d3ee"
+            strokeOpacity={0.2}
+            label={{ value: devise_affichee, angle: -90, position: 'insideLeft', fontSize: 11, fill: '#7c93ad' }}
           />
-          <Tooltip />
-          <Legend />
+          <Tooltip
+            contentStyle={{ background: '#0d1520', border: '1px solid rgba(34,211,238,0.3)', borderRadius: 12, fontSize: 12 }}
+            labelStyle={{ color: '#8ec9f2' }}
+          />
+          <Legend wrapperStyle={{ fontSize: 12, color: '#8ec9f2' }} />
           <Line
             type="monotone"
             dataKey="close"
             name="Prix"
-            stroke="#2b6cb0"
+            stroke="#5fe3ff"
             dot={false}
-            strokeWidth={1.5}
+            strokeWidth={1.8}
             connectNulls
           />
           <Line
             type="monotone"
             dataKey="ma_50"
             name="MA 50"
-            stroke="#f59e0b"
+            stroke="#fbbf24"
             dot={false}
             strokeWidth={1.8}
             connectNulls
@@ -523,7 +516,7 @@ function StockChartView({ chartState }: { chartState: ChartState | null }) {
             type="monotone"
             dataKey="ma_200"
             name="MA 200"
-            stroke="#1f4e79"
+            stroke="#a78bfa"
             dot={false}
             strokeWidth={1.8}
             connectNulls

@@ -111,31 +111,31 @@ export function ExpandModal({ isOpen, onClose, title, fullScreen, children }: Ex
       aria-modal="true"
       aria-label={title}
       onClick={onClose}
-      className={`fixed inset-0 z-50 flex items-center justify-center bg-gray-950/60 p-4 transition-opacity duration-200 ${
+      className={`fixed inset-0 z-50 flex items-center justify-center bg-navy-950/70 p-4 backdrop-blur-sm transition-opacity duration-200 ${
         visible ? 'opacity-100' : 'opacity-0'
       }`}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className={`flex w-full flex-col overflow-hidden rounded-lg bg-white shadow-xl transition-all duration-200 ${
+        className={`jarvis-card flex w-full flex-col overflow-hidden !rounded-3xl !bg-navy-900/90 shadow-2xl transition-all duration-200 ${
           fullScreen ? 'h-[92vh] max-w-none' : 'max-h-[90vh] max-w-3xl'
         } ${visible ? 'scale-100 opacity-100' : 'scale-95 opacity-0'}`}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-gray-200 px-5 py-3">
-          <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+        <div className="flex shrink-0 items-center justify-between border-b border-cyan-400/15 px-6 py-4">
+          <h2 className="jarvis-heading text-lg font-bold">{title}</h2>
           <button
             ref={closeButtonRef}
             type="button"
             onClick={onClose}
             aria-label="Fermer"
-            className="rounded-md p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+            className="rounded-full p-1.5 text-faint transition-colors hover:bg-white/10 hover:text-white"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
               <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
             </svg>
           </button>
         </div>
-        <div className={`overflow-y-auto p-5 ${fullScreen ? 'min-h-0 flex-1' : ''}`}>{children}</div>
+        <div className={`overflow-y-auto p-6 ${fullScreen ? 'min-h-0 flex-1' : ''}`}>{children}</div>
       </div>
     </div>,
     document.body,

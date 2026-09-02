@@ -2,10 +2,10 @@ import type { DirectionFilterValue, DirectionProbabilities } from '../types'
 
 // Shared filter control for every list page that shows a
 // direction_probabilities field (Resume du jour, Opportunites du jour,
-// News & Analyse IA, Raisonnement causal) -- same button style as
-// OpportunitiesPage.tsx's own pre-existing `priorite` filter (rounded-full,
-// bg-indigo-600 when active, bg-gray-100/hover:bg-gray-200 otherwise) so the
-// two filters read as one consistent family of controls.
+// News & Analyse IA, Raisonnement causal) -- same .jarvis-pill/
+// .jarvis-pill-active style (see index.css) as OpportunitiesPage.tsx's own
+// pre-existing `priorite` filter, so the two filters read as one
+// consistent family of controls.
 const DIRECTION_OPTIONS: { value: DirectionFilterValue; label: string }[] = [
   { value: 'toutes', label: 'Toutes' },
   { value: 'hausse', label: 'Hausse probable' },
@@ -21,17 +21,13 @@ export function DirectionFilter({
   onChange: (next: DirectionFilterValue) => void
 }) {
   return (
-    <div className="flex gap-2">
+    <div className="flex flex-wrap gap-2">
       {DIRECTION_OPTIONS.map((option) => (
         <button
           key={option.value}
           type="button"
           onClick={() => onChange(option.value)}
-          className={`rounded-full px-4 py-1.5 text-sm font-medium ${
-            value === option.value
-              ? 'bg-indigo-600 text-white'
-              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-          }`}
+          className={`jarvis-pill ${value === option.value ? 'jarvis-pill-active' : ''}`}
         >
           {option.label}
         </button>

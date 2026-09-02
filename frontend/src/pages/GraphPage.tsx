@@ -93,18 +93,14 @@ export function GraphPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900">Knowledge Graph</h1>
+      <h1 className="jarvis-title text-4xl font-bold">Knowledge Graph</h1>
 
-      <div className="mt-4 rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+      <div className="jarvis-card mt-4 p-5">
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={handleShowDefault}
-            className={`rounded-full px-4 py-1.5 text-sm font-medium ${
-              mode === 'default'
-                ? 'bg-indigo-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-            }`}
+            className={`jarvis-pill ${mode === 'default' ? 'jarvis-pill-active' : ''}`}
           >
             Top opportunites du jour
           </button>
@@ -121,7 +117,7 @@ export function GraphPage() {
             <button
               type="button"
               onClick={() => setFullScreen(true)}
-              className="ml-auto flex items-center gap-1.5 rounded-full border border-gray-300 px-4 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              className="jarvis-pill ml-auto"
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
                 <path d="M3.75 3.5a.75.75 0 0 0-.75.75v3a.75.75 0 0 0 1.5 0V5h1.75a.75.75 0 0 0 0-1.5h-2.5ZM16.25 3.5h-2.5a.75.75 0 0 0 0 1.5H15.5v2.25a.75.75 0 0 0 1.5 0v-3a.75.75 0 0 0-.75-.75ZM3 13.25a.75.75 0 0 1 .75.75v2.25h1.75a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 1 .75-.75ZM16.25 13.25a.75.75 0 0 1 .75.75v3a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75V14a.75.75 0 0 1 .75-.75Z" />
@@ -132,7 +128,7 @@ export function GraphPage() {
         </div>
 
         {graphState.status === 'ready' && (
-          <p className="mt-3 text-sm text-gray-500">
+          <p className="mt-3 text-sm text-faint">
             {graphState.data.nodes.length} noeuds ({graphState.data.n_primary} suivis,{' '}
             {graphState.data.n_external} externes) - {graphState.data.edges.length} relations
             {graphState.data.mode === 'top_opportunities' && graphState.data.top_tickers && (
@@ -150,23 +146,20 @@ export function GraphPage() {
 
         <div className="mt-4">
           {graphState.status === 'loading' && (
-            <div className="flex h-[560px] items-center justify-center gap-3 text-gray-600">
-              <span
-                className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-                aria-hidden="true"
-              />
+            <div className="flex h-[560px] items-center justify-center gap-3 text-faint">
+              <span className="jarvis-spinner h-5 w-5 animate-spin" aria-hidden="true" />
               Chargement du graphe...
             </div>
           )}
 
           {graphState.status === 'error' && (
-            <div className="rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+            <div className="jarvis-banner-error">
               <p className="font-medium">Impossible de charger le graphe.</p>
               <p className="mt-1 text-sm">{graphState.message}</p>
               <button
                 type="button"
                 onClick={() => loadGraph(mode, setGraphState)}
-                className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+                className="jarvis-pill-danger mt-3"
               >
                 Reessayer
               </button>
@@ -202,11 +195,7 @@ export function GraphPage() {
               <button
                 type="button"
                 onClick={handleShowDefault}
-                className={`rounded-full px-4 py-1.5 text-sm font-medium ${
-                  mode === 'default'
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
+                className={`jarvis-pill ${mode === 'default' ? 'jarvis-pill-active' : ''}`}
               >
                 Top opportunites du jour
               </button>
@@ -327,9 +316,9 @@ function AddRelationForm({
   }
 
   return (
-    <div className="mt-6 rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-      <h2 className="text-base font-semibold text-gray-900">Ajouter une relation manuellement</h2>
-      <p className="mt-1 text-sm text-gray-500">
+    <div className="jarvis-card mt-6 p-5">
+      <h2 className="jarvis-heading text-base font-bold">Ajouter une relation manuellement</h2>
+      <p className="mt-1 text-sm text-faint">
         Relation ecrite directement dans le Knowledge Graph actif, sans passer par la generation Groq --
         vous etes ici la validation humaine.
       </p>
@@ -337,7 +326,7 @@ function AddRelationForm({
       <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-4">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">Ticker source</label>
+            <label className="mb-1 block text-sm font-medium text-muted">Ticker source</label>
             {tickersState.status === 'ready' ? (
               <TickerSearch
                 key={`source-${resetKey}`}
@@ -346,16 +335,16 @@ function AddRelationForm({
                 placeholder="Rechercher le ticker source..."
               />
             ) : (
-              <p className="text-sm text-gray-500">Chargement de l'univers...</p>
+              <p className="text-sm text-faint">Chargement de l'univers...</p>
             )}
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">Type de relation</label>
+            <label className="mb-1 block text-sm font-medium text-muted">Type de relation</label>
             <select
               value={relationType}
               onChange={(e) => setRelationType(e.target.value)}
-              className="w-full max-w-md rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className="w-full max-w-md rounded-full border border-cyan-400/25 bg-navy-800/50 px-3 py-2 text-sm text-ink backdrop-blur-md focus:border-cyan-300/70 focus:outline-none focus:ring-1 focus:ring-cyan-300/50"
             >
               <option value="">-- Choisir --</option>
               {relationTypes.map((rt) => (
@@ -366,13 +355,14 @@ function AddRelationForm({
         </div>
 
         <div>
-          <span className="mb-1 block text-sm font-medium text-gray-700">Cible</span>
-          <div className="flex gap-4 text-sm text-gray-700">
+          <span className="mb-1 block text-sm font-medium text-muted">Cible</span>
+          <div className="flex gap-4 text-sm text-ink/80">
             <label className="flex items-center gap-1.5">
               <input
                 type="radio"
                 checked={targetMode === 'univers'}
                 onChange={() => setTargetMode('univers')}
+                className="accent-cyan-400"
               />
               Dans l'univers (recherche)
             </label>
@@ -381,6 +371,7 @@ function AddRelationForm({
                 type="radio"
                 checked={targetMode === 'externe'}
                 onChange={() => setTargetMode('externe')}
+                className="accent-cyan-400"
               />
               Externe (saisie manuelle)
             </label>
@@ -396,11 +387,11 @@ function AddRelationForm({
               placeholder="Rechercher le ticker cible..."
             />
           ) : (
-            <p className="text-sm text-gray-500">Chargement de l'univers...</p>
+            <p className="text-sm text-faint">Chargement de l'univers...</p>
           )
         ) : (
           <div className="flex flex-col gap-3">
-            <p className="text-xs text-amber-700">
+            <p className="text-xs text-amber-300">
               Cible hors univers : jamais verifiee empiriquement (pas de confirmation qu'elle est
               reellement cotee), contrairement aux ajouts automatiques qui passent par une
               verification yfinance avant d'entrer dans l'univers.
@@ -410,27 +401,27 @@ function AddRelationForm({
               value={targetNameManual}
               onChange={(e) => setTargetNameManual(e.target.value)}
               placeholder="Nom de l'entreprise cible"
-              className="w-full max-w-md rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className="w-full max-w-md rounded-full border border-cyan-400/25 bg-navy-800/50 px-4 py-2 text-sm text-ink placeholder:text-faint backdrop-blur-md focus:border-cyan-300/70 focus:outline-none focus:ring-1 focus:ring-cyan-300/50"
             />
             <input
               type="text"
               value={targetTickerManual}
               onChange={(e) => setTargetTickerManual(e.target.value)}
               placeholder="Ticker cible (optionnel)"
-              className="w-full max-w-md rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className="w-full max-w-md rounded-full border border-cyan-400/25 bg-navy-800/50 px-4 py-2 text-sm text-ink placeholder:text-faint backdrop-blur-md focus:border-cyan-300/70 focus:outline-none focus:ring-1 focus:ring-cyan-300/50"
             />
           </div>
         )}
 
         <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">
+          <label className="mb-1 block text-sm font-medium text-muted">
             Justification / note (optionnel)
           </label>
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             rows={2}
-            className="w-full max-w-md rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            className="w-full max-w-md rounded-2xl border border-cyan-400/25 bg-navy-800/50 px-4 py-2 text-sm text-ink placeholder:text-faint backdrop-blur-md focus:border-cyan-300/70 focus:outline-none focus:ring-1 focus:ring-cyan-300/50"
           />
         </div>
 
@@ -438,17 +429,17 @@ function AddRelationForm({
           <button
             type="submit"
             disabled={addState.status === 'loading'}
-            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            className="jarvis-pill-primary"
           >
             {addState.status === 'loading' ? 'Ajout en cours...' : 'Ajouter'}
           </button>
         </div>
 
         {addState.status === 'error' && (
-          <p className="text-sm text-red-600">{addState.message}</p>
+          <p className="text-sm text-red-400">{addState.message}</p>
         )}
         {addState.status === 'done' && (
-          <p className="text-sm text-emerald-700">{addState.message}</p>
+          <p className="text-sm text-emerald-400">{addState.message}</p>
         )}
       </form>
     </div>
@@ -484,20 +475,20 @@ function ManualRelationsPanel({
   }
 
   return (
-    <div className="mt-6 rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-      <h2 className="text-base font-semibold text-gray-900">Relations ajoutees manuellement</h2>
+    <div className="jarvis-card mt-6 p-5">
+      <h2 className="jarvis-heading text-base font-bold">Relations ajoutees manuellement</h2>
 
       {manualState.status === 'loading' && (
-        <p className="mt-3 text-sm text-gray-500">Chargement...</p>
+        <p className="mt-3 text-sm text-faint">Chargement...</p>
       )}
       {manualState.status === 'error' && (
-        <p className="mt-3 text-sm text-red-600">{manualState.message}</p>
+        <p className="mt-3 text-sm text-red-400">{manualState.message}</p>
       )}
-      {deleteError && <p className="mt-3 text-sm text-red-600">{deleteError}</p>}
+      {deleteError && <p className="mt-3 text-sm text-red-400">{deleteError}</p>}
 
       {manualState.status === 'ready' && (
         manualState.relations.length === 0 ? (
-          <p className="mt-3 text-sm text-gray-500">Aucune relation ajoutee manuellement pour l'instant.</p>
+          <p className="mt-3 text-sm text-faint">Aucune relation ajoutee manuellement pour l'instant.</p>
         ) : (
           <ul className="mt-3 flex flex-col gap-2">
             {manualState.relations.map((rel) => {
@@ -505,18 +496,18 @@ function ManualRelationsPanel({
               return (
                 <li
                   key={rel.id}
-                  className="flex items-center justify-between gap-3 rounded-md border border-gray-100 bg-gray-50 px-3 py-2 text-sm"
+                  className="flex items-center justify-between gap-3 rounded-xl border border-cyan-400/10 bg-white/5 px-3 py-2 text-sm"
                 >
                   <span>
-                    <code className="text-gray-900">{rel.source_ticker}</code>{' '}
-                    -- <span className="font-semibold">{rel.relation_type}</span> --{'>'} {targetDisplay}
-                    {rel.notes && <span className="text-gray-500"> -- {rel.notes}</span>}
+                    <code className="jarvis-metric text-cyan-200">{rel.source_ticker}</code>{' '}
+                    -- <span className="font-semibold text-ink">{rel.relation_type}</span> --{'>'} <span className="text-ink/80">{targetDisplay}</span>
+                    {rel.notes && <span className="text-faint"> -- {rel.notes}</span>}
                   </span>
                   <button
                     type="button"
                     onClick={() => handleDelete(rel.id)}
                     disabled={deletingIds.has(rel.id)}
-                    className="shrink-0 rounded-md border border-red-200 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                    className="jarvis-pill-danger shrink-0 !px-3 !py-1 text-xs"
                   >
                     {deletingIds.has(rel.id) ? 'Suppression...' : 'Supprimer'}
                   </button>

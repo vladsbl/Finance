@@ -18,20 +18,22 @@ interface PriceHeadlineProps {
 
 export function PriceHeadline({ price, currency, variationPct, variationLabel = '1j' }: PriceHeadlineProps) {
   if (price === null) {
-    return <p className="text-sm text-gray-500">Prix indisponible</p>
+    return <p className="text-sm text-faint">Prix indisponible</p>
   }
 
   const positive = variationPct !== null && variationPct >= 0
   const colorClass =
-    variationPct === null ? 'text-gray-900' : positive ? 'text-emerald-600' : 'text-red-600'
+    variationPct === null ? 'text-ink' : positive ? 'text-emerald-400' : 'text-red-400'
+  const glowClass =
+    variationPct === null ? '' : positive ? 'drop-shadow-[0_0_10px_rgba(52,211,153,0.35)]' : 'drop-shadow-[0_0_10px_rgba(248,113,113,0.35)]'
 
   return (
     <div>
-      <p className={`text-3xl font-bold leading-tight ${colorClass}`}>
+      <p className={`jarvis-metric text-3xl font-bold leading-tight ${colorClass} ${glowClass}`}>
         {price.toFixed(2)} {currency}
       </p>
       {variationPct !== null && (
-        <p className={`text-sm font-semibold ${colorClass}`}>
+        <p className={`jarvis-metric text-sm font-semibold ${colorClass}`}>
           {positive ? '+' : ''}
           {variationPct.toFixed(1)}% ({variationLabel})
         </p>

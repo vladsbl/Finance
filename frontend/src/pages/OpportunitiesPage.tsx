@@ -47,9 +47,9 @@ const DIRECTION_LABELS: Record<Exclude<DirectionFilterValue, 'toutes'>, string> 
 }
 
 const DIRECTION_COLORS: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
-  hausse: 'text-emerald-600',
-  stagnation: 'text-gray-500',
-  baisse: 'text-red-600',
+  hausse: 'text-emerald-400',
+  stagnation: 'text-slate-400',
+  baisse: 'text-red-400',
 }
 
 export function OpportunitiesPage() {
@@ -80,19 +80,15 @@ export function OpportunitiesPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900">Opportunites du jour</h1>
+      <h1 className="jarvis-title text-4xl font-bold">Opportunites du jour</h1>
 
-      <div className="mt-4 flex gap-2">
+      <div className="mt-4 flex flex-wrap gap-2">
         {PRIORITE_OPTIONS.map((option) => (
           <button
             key={option}
             type="button"
             onClick={() => handlePrioriteChange(option)}
-            className={`rounded-full px-4 py-1.5 text-sm font-medium ${
-              priorite === option
-                ? 'bg-indigo-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-            }`}
+            className={`jarvis-pill ${priorite === option ? 'jarvis-pill-active' : ''}`}
           >
             {option}
           </button>
@@ -104,23 +100,20 @@ export function OpportunitiesPage() {
       </div>
 
       {state.status === 'loading' && (
-        <div className="mt-8 flex items-center gap-3 text-gray-600">
-          <span
-            className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-            aria-hidden="true"
-          />
+        <div className="mt-8 flex items-center gap-3 text-faint">
+          <span className="jarvis-spinner h-5 w-5 animate-spin" aria-hidden="true" />
           Chargement des opportunites...
         </div>
       )}
 
       {state.status === 'error' && (
-        <div className="mt-8 rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+        <div className="jarvis-banner-error mt-8">
           <p className="font-medium">Impossible de charger les opportunites.</p>
           <p className="mt-1 text-sm">{state.message}</p>
           <button
             type="button"
             onClick={() => loadOpportunites(priorite, page, direction, setState)}
-            className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+            className="jarvis-pill-danger mt-3"
           >
             Reessayer
           </button>
@@ -130,54 +123,54 @@ export function OpportunitiesPage() {
       {state.status === 'ready' && (
         <>
           {state.data.staleness && (
-            <p className="mt-4 text-sm text-amber-700">{state.data.staleness}</p>
+            <p className="mt-4 text-sm text-amber-300">{state.data.staleness}</p>
           )}
-          <p className="mt-1 text-sm text-gray-500">{state.data.n_total} ticker(s).</p>
+          <p className="mt-1 text-sm text-faint">{state.data.n_total} ticker(s).</p>
 
           {state.data.opportunites.length === 0 ? (
-            <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+            <div className="jarvis-empty mt-8">
               Aucune opportunite calculee pour cette priorite.
             </div>
           ) : (
-            <div className="mt-4 overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200 text-sm">
+            <div className="jarvis-card mt-4 overflow-x-auto p-2">
+              <table className="min-w-full divide-y divide-cyan-400/10 text-sm">
                 <thead>
-                  <tr className="text-left text-gray-500">
-                    <th className="py-2 pr-4">Ticker</th>
-                    <th className="py-2 pr-4">Nom</th>
-                    <th className="py-2 pr-4">Priorite</th>
-                    <th className="py-2 pr-4">Score global</th>
-                    <th className="py-2 pr-4">Prix/Valo</th>
-                    <th className="py-2 pr-4">Technique</th>
-                    <th className="py-2 pr-4">News</th>
-                    <th className="py-2 pr-4">Fondamental reel</th>
-                    <th className="py-2 pr-4">Confiance</th>
-                    <th className="py-2 pr-4">Direction</th>
+                  <tr className="text-left text-faint">
+                    <th className="px-2 py-2">Ticker</th>
+                    <th className="px-2 py-2">Nom</th>
+                    <th className="px-2 py-2">Priorite</th>
+                    <th className="px-2 py-2">Score global</th>
+                    <th className="px-2 py-2">Prix/Valo</th>
+                    <th className="px-2 py-2">Technique</th>
+                    <th className="px-2 py-2">News</th>
+                    <th className="px-2 py-2">Fondamental reel</th>
+                    <th className="px-2 py-2">Confiance</th>
+                    <th className="px-2 py-2">Direction</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
+                <tbody className="divide-y divide-cyan-400/5">
                   {state.data.opportunites.map((o) => (
-                    <tr key={o.ticker} className="hover:bg-gray-50">
-                      <td className="py-2 pr-4 font-medium text-gray-900">{o.ticker}</td>
-                      <td className="py-2 pr-4 text-gray-700">{o.nom_affiche}</td>
-                      <td className="py-2 pr-4 text-gray-500">{o.priorite}</td>
-                      <td className="py-2 pr-4 font-semibold text-gray-900">
+                    <tr key={o.ticker} className="transition-colors hover:bg-white/5">
+                      <td className="jarvis-metric px-2 py-2 font-medium text-cyan-200">{o.ticker}</td>
+                      <td className="px-2 py-2 text-ink/80">{o.nom_affiche}</td>
+                      <td className="px-2 py-2 text-faint">{o.priorite}</td>
+                      <td className="jarvis-metric px-2 py-2 font-semibold text-ink">
                         {formatScore(o.score_global)}
                       </td>
-                      <td className="py-2 pr-4 text-gray-600">
+                      <td className="jarvis-metric px-2 py-2 text-ink/70">
                         {formatScore(o.score_prix_valorisation)}
                       </td>
-                      <td className="py-2 pr-4 text-gray-600">{formatScore(o.score_technique)}</td>
-                      <td className="py-2 pr-4 text-gray-600">{formatScore(o.score_news)}</td>
-                      <td className="py-2 pr-4 text-gray-600">
+                      <td className="jarvis-metric px-2 py-2 text-ink/70">{formatScore(o.score_technique)}</td>
+                      <td className="jarvis-metric px-2 py-2 text-ink/70">{formatScore(o.score_news)}</td>
+                      <td className="jarvis-metric px-2 py-2 text-ink/70">
                         {formatScore(o.score_fondamental_reel)}
                       </td>
-                      <td className="py-2 pr-4 text-gray-600">
+                      <td className="jarvis-metric px-2 py-2 text-ink/70">
                         {o.confiance === null ? 'n/a' : `${o.confiance.toFixed(0)}%`}
                       </td>
-                      <td className="py-2 pr-4">
+                      <td className="px-2 py-2">
                         {o.direction_probabilities === null ? (
-                          <span className="text-gray-400">n/a</span>
+                          <span className="text-slate-500">n/a</span>
                         ) : (
                           <span className={`font-medium ${DIRECTION_COLORS[dominantDirection(o.direction_probabilities)]}`}>
                             {DIRECTION_LABELS[dominantDirection(o.direction_probabilities)]}
@@ -192,12 +185,12 @@ export function OpportunitiesPage() {
           )}
 
           {state.data.n_total > 0 && (
-            <div className="mt-4 flex items-center justify-between text-sm text-gray-600">
+            <div className="mt-4 flex items-center justify-between text-sm text-faint">
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.max(0, p - 1))}
                 disabled={page === 0}
-                className="rounded-md border border-gray-300 px-3 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-gray-50"
+                className="jarvis-pill"
               >
                 Precedent
               </button>
@@ -208,7 +201,7 @@ export function OpportunitiesPage() {
                 type="button"
                 onClick={() => setPage((p) => p + 1)}
                 disabled={(page + 1) * PAGE_SIZE >= state.data.n_total}
-                className="rounded-md border border-gray-300 px-3 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-gray-50"
+                className="jarvis-pill"
               >
                 Suivant
               </button>

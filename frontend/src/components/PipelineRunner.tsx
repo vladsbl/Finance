@@ -68,10 +68,10 @@ function lastRunLabel(state: PipelineState | null): string | null {
 }
 
 const DOT_STYLES: Record<PipelineStatus, string> = {
-  idle: 'bg-gray-300',
-  running: 'bg-indigo-500',
-  success: 'bg-emerald-500',
-  failed: 'bg-red-500',
+  idle: 'bg-slate-500',
+  running: 'bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.8)]',
+  success: 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]',
+  failed: 'bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.8)]',
 }
 
 export function PipelineRunner() {
@@ -150,7 +150,7 @@ export function PipelineRunner() {
     <div className="flex flex-col items-end gap-1 py-2 text-right">
       <div className="flex items-center gap-2">
         {isRunning && last && (
-          <span className="text-xs text-gray-500">
+          <span className="text-xs text-faint">
             {last.current_step
               ? `${last.current_step} (${last.steps_done + 1}/${last.steps_total})`
               : `${last.steps_done}/${last.steps_total} etapes`}
@@ -166,11 +166,11 @@ export function PipelineRunner() {
               ? 'Un recalcul est deja en cours'
               : 'Relance pipeline/run_daily.py (plusieurs minutes)'
           }
-          className="flex items-center gap-2 rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+          className="jarvis-pill-primary"
         >
           {busy && (
             <span
-              className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"
+              className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-cyan-200/30 border-t-cyan-200"
               aria-hidden="true"
             />
           )}
@@ -183,7 +183,7 @@ export function PipelineRunner() {
           className={`h-1.5 w-1.5 rounded-full ${DOT_STYLES[state?.status ?? 'idle']}`}
           aria-hidden="true"
         />
-        <span className="text-gray-500">
+        <span className="text-faint">
           {lastLabel ? `Dernier recalcul : ${lastLabel}` : 'Aucun recalcul enregistre'}
         </span>
       </div>
@@ -191,14 +191,14 @@ export function PipelineRunner() {
       {flash && (
         <span
           className={`text-xs font-medium ${
-            flash.status === 'success' ? 'text-emerald-700' : 'text-red-600'
+            flash.status === 'success' ? 'text-emerald-400' : 'text-red-400'
           }`}
         >
           {flash.message}
         </span>
       )}
 
-      {actionError && <span className="max-w-xs text-xs text-red-600">{actionError}</span>}
+      {actionError && <span className="max-w-xs text-xs text-red-400">{actionError}</span>}
     </div>
   )
 }

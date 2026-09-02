@@ -62,9 +62,9 @@ const PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 300
 
 const TONALITE_STYLES: Record<string, string> = {
-  positive: 'bg-emerald-100 text-emerald-800',
-  negative: 'bg-red-100 text-red-800',
-  neutre: 'bg-gray-100 text-gray-700',
+  positive: 'bg-emerald-400/15 text-emerald-300',
+  negative: 'bg-red-400/15 text-red-300',
+  neutre: 'bg-white/10 text-ink/80',
 }
 
 function tonaliteStyle(tonalite: string): string {
@@ -97,9 +97,9 @@ const DIRECTION_LABELS: Record<Exclude<DirectionFilterValue, 'toutes'>, string> 
 }
 
 const DIRECTION_BADGE_STYLES: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
-  hausse: 'bg-emerald-100 text-emerald-800',
-  stagnation: 'bg-gray-100 text-gray-700',
-  baisse: 'bg-red-100 text-red-800',
+  hausse: 'bg-emerald-400/15 text-emerald-300',
+  stagnation: 'bg-white/10 text-ink/80',
+  baisse: 'bg-red-400/15 text-red-300',
 }
 
 function loadNews(
@@ -253,10 +253,10 @@ export function NewsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900">News &amp; Analyse IA</h1>
+      <h1 className="jarvis-title text-4xl font-bold">News &amp; Analyse IA</h1>
 
       <div className="mt-4">
-        <label htmlFor="news-search" className="mb-1 block text-sm font-medium text-gray-700">
+        <label htmlFor="news-search" className="mb-1 block text-sm font-medium text-muted">
           Rechercher
         </label>
         {/* Free text across title/entreprise/secteur/zone/ticker (see
@@ -278,13 +278,13 @@ export function NewsPage() {
             }}
             onKeyDown={handleSearchKeyDown}
             placeholder="Titre, entreprise, secteur, zone, ticker (ex: Apple, Energie, Asie...)"
-            className="w-full rounded-md border border-gray-300 px-3 py-2 pr-20 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            className="w-full rounded-full border border-cyan-400/25 bg-navy-800/50 px-4 py-2 pr-20 text-sm text-ink placeholder:text-faint backdrop-blur-md transition-all focus:border-cyan-300/70 focus:outline-none focus:ring-1 focus:ring-cyan-300/50"
           />
           {search && (
             <button
               type="button"
               onClick={() => handleSearchChange('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-2 py-0.5 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full px-2 py-0.5 text-xs font-medium text-faint hover:bg-white/10 hover:text-ink"
             >
               Effacer
             </button>
@@ -297,7 +297,7 @@ export function NewsPage() {
 
       {facetsState.status === 'ready' && facetsState.data.sectors.length > 0 && (
         <div className="mt-3 flex flex-wrap items-center gap-3">
-          <label htmlFor="news-sector" className="text-sm font-medium text-gray-700">
+          <label htmlFor="news-sector" className="text-sm font-medium text-muted">
             Secteur
           </label>
           {/* Native <select> (not buttons): 450+ distinct real sector
@@ -308,7 +308,7 @@ export function NewsPage() {
             id="news-sector"
             value={sector}
             onChange={(e) => handleSectorChange(e.target.value)}
-            className="rounded-md border border-gray-300 px-2 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            className="rounded-full border border-cyan-400/25 bg-navy-800/50 px-3 py-1.5 text-sm text-ink backdrop-blur-md focus:border-cyan-300/70 focus:outline-none focus:ring-1 focus:ring-cyan-300/50"
           >
             <option value="">Tous les secteurs</option>
             {facetsState.data.sectors.map((s) => (
@@ -322,7 +322,7 @@ export function NewsPage() {
 
       {facetsState.status === 'ready' && facetsState.data.zones.length > 0 && (
         <div className="mt-3">
-          <span className="mb-1 block text-sm font-medium text-gray-700">Zone geographique</span>
+          <span className="mb-1 block text-sm font-medium text-muted">Zone geographique</span>
           {/* Button row (not a dropdown): only a handful of distinct real
               zone values at last count -- see load_news_facets' own
               docstring -- small enough that buttons stay readable, same
@@ -331,9 +331,7 @@ export function NewsPage() {
             <button
               type="button"
               onClick={() => handleZoneChange('')}
-              className={`rounded-full px-4 py-1.5 text-sm font-medium ${
-                zone === '' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
+              className={`jarvis-pill ${zone === '' ? 'jarvis-pill-active' : ''}`}
             >
               Toutes les zones
             </button>
@@ -342,9 +340,7 @@ export function NewsPage() {
                 key={z.value}
                 type="button"
                 onClick={() => handleZoneChange(z.value)}
-                className={`rounded-full px-4 py-1.5 text-sm font-medium ${
-                  zone === z.value ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
+                className={`jarvis-pill ${zone === z.value ? 'jarvis-pill-active' : ''}`}
               >
                 {z.value} ({z.count})
               </button>
@@ -358,17 +354,14 @@ export function NewsPage() {
       </div>
 
       {newsState.status === 'loading' && (
-        <div className="mt-8 flex items-center gap-3 text-gray-600">
-          <span
-            className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-            aria-hidden="true"
-          />
+        <div className="mt-8 flex items-center gap-3 text-faint">
+          <span className="jarvis-spinner h-5 w-5 animate-spin" aria-hidden="true" />
           Chargement des news...
         </div>
       )}
 
       {newsState.status === 'error' && (
-        <div className="mt-8 rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+        <div className="jarvis-banner-error mt-8">
           <p className="font-medium">Impossible de charger les news.</p>
           <p className="mt-1 text-sm">{newsState.message}</p>
           <button
@@ -382,7 +375,7 @@ export function NewsPage() {
                 setNewsState,
               )
             }
-            className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+            className="jarvis-pill-danger mt-3"
           >
             Reessayer
           </button>
@@ -391,7 +384,7 @@ export function NewsPage() {
 
       {newsState.status === 'ready' && (
         <>
-          <p className="mt-4 text-sm text-gray-500">
+          <p className="mt-4 text-sm text-faint">
             {newsState.data.n_total} news analysee(s)
             {newsState.data.ticker ? ` pour ${newsState.data.ticker}` : ''}
             {newsState.data.search ? ` pour « ${newsState.data.search} »` : ''}
@@ -401,7 +394,7 @@ export function NewsPage() {
           </p>
 
           {newsState.data.news.length === 0 ? (
-            <div className="mt-8 rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+            <div className="jarvis-empty mt-8">
               {newsState.data.ticker || newsState.data.search || newsState.data.sector || newsState.data.zone
                 ? 'Aucune news ne correspond a ces filtres.'
                 : "Aucune news analysee pour l'instant. Lance ingestion/fetch_news.py puis reasoning/analyze_news.py."}
@@ -415,12 +408,12 @@ export function NewsPage() {
           )}
 
           {newsState.data.n_total > 0 && (
-            <div className="mt-4 flex items-center justify-between text-sm text-gray-600">
+            <div className="mt-4 flex items-center justify-between text-sm text-faint">
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.max(0, p - 1))}
                 disabled={page === 0}
-                className="rounded-md border border-gray-300 px-3 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-gray-50"
+                className="jarvis-pill"
               >
                 Precedent
               </button>
@@ -431,7 +424,7 @@ export function NewsPage() {
                 type="button"
                 onClick={() => setPage((p) => p + 1)}
                 disabled={(page + 1) * PAGE_SIZE >= newsState.data.n_total}
-                className="rounded-md border border-gray-300 px-3 py-1.5 font-medium disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-gray-50"
+                className="jarvis-pill"
               >
                 Suivant
               </button>
@@ -492,17 +485,17 @@ function NewsCard({ item }: { item: NewsItem }) {
   }
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+    <div className="jarvis-card p-5">
       <div className="flex flex-wrap items-center gap-2">
         <span
           className={`rounded-full px-2.5 py-1 text-xs font-medium ${tonaliteStyle(item.tonalite)}`}
         >
           {item.tonalite}
         </span>
-        <span className="text-sm font-semibold text-gray-900">
+        <span className="jarvis-metric text-sm font-semibold text-ink">
           Importance {item.importance ?? '?'}/10
         </span>
-        <span className="text-sm text-gray-500">
+        <span className="text-sm text-faint">
           &middot; confiance {item.confidence !== null ? `${item.confidence.toFixed(0)}%` : '?'}
         </span>
         {item.direction_probabilities && (
@@ -513,29 +506,29 @@ function NewsCard({ item }: { item: NewsItem }) {
           </span>
         )}
         {sectorZone && (
-          <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700">
+          <span className="rounded-full bg-cyan-400/15 px-2.5 py-1 text-xs font-medium text-cyan-200">
             {sectorZone}
           </span>
         )}
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="ml-auto rounded-md border border-gray-300 px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+          className="jarvis-pill ml-auto !py-1 text-xs"
         >
           Agrandir
         </button>
-        <span className="text-xs text-gray-400">
+        <span className="text-xs text-slate-500">
           {(item.published_at || '').slice(0, 10)}
         </span>
       </div>
 
-      <h3 className="mt-2 text-base font-medium text-gray-900">
+      <h3 className="mt-2 text-base font-medium text-ink">
         {item.url ? (
           <a
             href={item.url}
             target="_blank"
             rel="noreferrer"
-            className="text-indigo-700 hover:underline"
+            className="text-cyan-300 hover:underline"
           >
             {item.title}
           </a>
@@ -543,7 +536,7 @@ function NewsCard({ item }: { item: NewsItem }) {
           item.title
         )}
       </h3>
-      {meta && <p className="mt-1 text-xs text-gray-500">{meta}</p>}
+      {meta && <p className="mt-1 text-xs text-faint">{meta}</p>}
 
       {item.ticker && (
         <div className="mt-2">
@@ -551,35 +544,35 @@ function NewsCard({ item }: { item: NewsItem }) {
         </div>
       )}
 
-      <p className="mt-3 text-sm text-gray-800">{item.summary_paragraph}</p>
+      <p className="mt-3 text-sm text-ink/85">{item.summary_paragraph}</p>
 
-      <p className="mt-3 text-xs text-gray-500">
+      <p className="jarvis-metric mt-3 text-xs text-faint">
         Prix avant/apres cette news : {formatPriceContext(item.price_context)}
       </p>
 
       <ExpandModal isOpen={expanded} onClose={() => setExpanded(false)} title={item.title}>
         <div className="flex flex-col gap-5">
-          {meta && <p className="text-xs text-gray-500">{meta}</p>}
+          {meta && <p className="text-xs text-faint">{meta}</p>}
 
           {item.ticker && <CompanyDescription ticker={item.ticker} />}
 
-          <p className="text-base text-gray-800">{item.summary_paragraph}</p>
+          <p className="text-base text-ink/85">{item.summary_paragraph}</p>
 
           <div>
-            <h3 className="text-sm font-semibold text-gray-900">Impact prix autour de la news</h3>
-            <p className="mt-1 text-sm text-gray-700">{formatPriceContext(item.price_context)}</p>
+            <h3 className="jarvis-heading text-sm font-bold">Impact prix autour de la news</h3>
+            <p className="jarvis-metric mt-1 text-sm text-ink/70">{formatPriceContext(item.price_context)}</p>
           </div>
 
           {item.ticker && (
             <div>
-              <h3 className="text-sm font-semibold text-gray-900">
+              <h3 className="jarvis-heading text-sm font-bold">
                 Contexte actuel de {item.ticker}
               </h3>
               {stockState.status === 'loading' && (
-                <p className="mt-1 text-sm text-gray-500">Chargement...</p>
+                <p className="mt-1 text-sm text-faint">Chargement...</p>
               )}
               {stockState.status === 'error' && (
-                <p className="mt-1 text-sm text-red-600">{stockState.message}</p>
+                <p className="mt-1 text-sm text-red-400">{stockState.message}</p>
               )}
               {stockState.status === 'ready' && (
                 <div className="mt-2">
@@ -607,14 +600,14 @@ function NewsCard({ item }: { item: NewsItem }) {
                   </div>
                   <div className="mt-3 flex gap-6 text-xs">
                     <div>
-                      <span className="text-gray-500">Score final</span>
-                      <p className="text-sm font-semibold text-gray-900">
+                      <span className="text-faint">Score final</span>
+                      <p className="jarvis-metric text-sm font-semibold text-ink">
                         {stockState.data.final_score !== null ? stockState.data.final_score.toFixed(0) : 'n/a'}
                       </p>
                     </div>
                     <div>
-                      <span className="text-gray-500">Confiance</span>
-                      <p className="text-sm font-semibold text-gray-900">
+                      <span className="text-faint">Confiance</span>
+                      <p className="jarvis-metric text-sm font-semibold text-ink">
                         {stockState.data.confidence !== null ? `${stockState.data.confidence.toFixed(0)}%` : 'n/a'}
                       </p>
                     </div>
@@ -624,9 +617,9 @@ function NewsCard({ item }: { item: NewsItem }) {
             </div>
           )}
 
-          <div className="border-t border-gray-100 pt-4">
-            <h3 className="text-sm font-semibold text-gray-900">Analyse enrichie (IA)</h3>
-            <p className="mt-1 text-xs text-gray-500">
+          <div className="border-t border-cyan-400/15 pt-4">
+            <h3 className="jarvis-heading text-sm font-bold">Analyse enrichie (IA)</h3>
+            <p className="mt-1 text-xs text-faint">
               Explication redigee (de quoi parle la news, pourquoi elle compte, impact sur
               l'entreprise et ses entreprises liees) -- generee a la demande, mise en cache
               ensuite.
@@ -636,24 +629,21 @@ function NewsCard({ item }: { item: NewsItem }) {
                 <button
                   type="button"
                   onClick={handleLoadNarrative}
-                  className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+                  className="jarvis-pill-primary"
                 >
                   Voir l'analyse enrichie (IA)
                 </button>
               )}
 
               {narrative.status === 'loading' && (
-                <div className="flex items-center gap-2 text-sm text-gray-500">
-                  <span
-                    className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-                    aria-hidden="true"
-                  />
+                <div className="flex items-center gap-2 text-sm text-faint">
+                  <span className="jarvis-spinner h-4 w-4 animate-spin" aria-hidden="true" />
                   Generation en cours...
                 </div>
               )}
 
               {narrative.status === 'error' && (
-                <div className="text-sm text-red-600">
+                <div className="text-sm text-red-400">
                   {narrative.message}
                   <button
                     type="button"
@@ -668,14 +658,14 @@ function NewsCard({ item }: { item: NewsItem }) {
               {narrative.status === 'done' && narrative.texte && (
                 <div>
                   <MarkdownText>{narrative.texte}</MarkdownText>
-                  <p className="mt-2 text-xs text-gray-400">
+                  <p className="mt-2 text-xs text-slate-500">
                     {narrative.source === 'cache' ? 'Depuis le cache' : "Generee a l'instant"}
                   </p>
                 </div>
               )}
 
               {narrative.status === 'done' && !narrative.texte && (
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-faint">
                   Analyse enrichie indisponible pour l'instant (quota dedie atteint, cle API
                   absente, ou erreur reseau cote serveur).
                 </p>
@@ -688,7 +678,7 @@ function NewsCard({ item }: { item: NewsItem }) {
               href={item.url}
               target="_blank"
               rel="noreferrer"
-              className="text-sm text-indigo-700 hover:underline"
+              className="text-sm text-cyan-300 hover:underline"
             >
               Lire l'article source
             </a>

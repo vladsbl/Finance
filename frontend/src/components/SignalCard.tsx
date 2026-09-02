@@ -7,13 +7,13 @@ import { PriceHeadline } from './PriceHeadline'
 import type { Signal } from '../types'
 
 const RISK_STYLES: Record<string, string> = {
-  Faible: 'bg-emerald-100 text-emerald-800',
-  Modere: 'bg-amber-100 text-amber-800',
-  Eleve: 'bg-red-100 text-red-800',
+  Faible: 'bg-emerald-400/15 text-emerald-300',
+  Modere: 'bg-amber-400/15 text-amber-300',
+  Eleve: 'bg-red-400/15 text-red-300',
 }
 
 function riskBadgeClass(risque: string): string {
-  return RISK_STYLES[risque] ?? 'bg-gray-100 text-gray-800'
+  return RISK_STYLES[risque] ?? 'bg-white/10 text-ink/80'
 }
 
 function formatVariation(pct: number | null): string {
@@ -47,10 +47,10 @@ export function SignalCard({ signal }: { signal: Signal }) {
   }
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+    <div className="jarvis-card p-5">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="text-lg font-semibold text-gray-900">
-          {signal.ticker} <span className="font-normal text-gray-500">-- {signal.nom_affiche}</span>
+        <h3 className="jarvis-heading text-lg font-bold">
+          {signal.ticker} <span className="font-normal text-faint">-- {signal.nom_affiche}</span>
         </h3>
         <div className="flex items-center gap-2">
           <span className={`rounded-full px-3 py-1 text-sm font-medium ${riskBadgeClass(signal.risque)}`}>
@@ -59,7 +59,7 @@ export function SignalCard({ signal }: { signal: Signal }) {
           <button
             type="button"
             onClick={() => setExpanded(true)}
-            className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-600 hover:bg-gray-50"
+            className="jarvis-pill !py-1 text-xs"
           >
             Detail complet
           </button>
@@ -78,7 +78,7 @@ export function SignalCard({ signal }: { signal: Signal }) {
             currency={signal.prix.devise}
             variationPct={signal.prix.variations['1j']}
           />
-          <p className="mt-1 text-xs text-gray-500">
+          <p className="mt-1 text-xs text-faint">
             7j: {formatVariation(signal.prix.variations['7j'])} - 30j:{' '}
             {formatVariation(signal.prix.variations['30j'])}
           </p>
@@ -93,40 +93,40 @@ export function SignalCard({ signal }: { signal: Signal }) {
       {/* Secondary scores -- smaller, below the price and the probabilities. */}
       <div className="mt-3 flex flex-wrap gap-6 text-xs">
         <div>
-          <span className="text-gray-500">Score ajuste</span>
-          <p className="text-sm font-semibold text-gray-900">{signal.score_ajuste.toFixed(1)}</p>
+          <span className="text-faint">Score ajuste</span>
+          <p className="jarvis-metric text-sm font-semibold text-ink">{signal.score_ajuste.toFixed(1)}</p>
         </div>
         <div>
-          <span className="text-gray-500">Confiance</span>
-          <p className="text-sm font-semibold text-gray-900">{signal.confiance.toFixed(0)}%</p>
+          <span className="text-faint">Confiance</span>
+          <p className="jarvis-metric text-sm font-semibold text-ink">{signal.confiance.toFixed(0)}%</p>
         </div>
       </div>
 
-      <p className="mt-3 text-sm text-gray-700">{signal.explication}</p>
+      <p className="mt-3 text-sm text-ink/80">{signal.explication}</p>
 
       {signal.conflit_composantes && (
-        <p className="mt-2 text-xs font-medium text-amber-700">
+        <p className="mt-2 text-xs font-medium text-amber-300">
           Contradiction detectee entre les composantes structurelles.
         </p>
       )}
 
-      <p className="mt-2 text-xs text-gray-400">{signal.horizon}</p>
+      <p className="mt-2 text-xs text-slate-500">{signal.horizon}</p>
 
-      <div className="mt-4 border-t border-gray-100 pt-4">
+      <div className="mt-4 border-t border-cyan-400/15 pt-4">
         {arguedText.status === 'idle' && (
           <button
             type="button"
             onClick={handleLoadArguedText}
-            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            className="jarvis-pill-primary"
           >
             Voir l'analyse argumentee (IA)
           </button>
         )}
 
         {arguedText.status === 'loading' && (
-          <div className="flex items-center gap-2 text-sm text-gray-500">
+          <div className="flex items-center gap-2 text-sm text-faint">
             <span
-              className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
+              className="h-4 w-4 animate-spin rounded-full border-2 border-cyan-400/20 border-t-cyan-400"
               aria-hidden="true"
             />
             Generation en cours...
@@ -134,7 +134,7 @@ export function SignalCard({ signal }: { signal: Signal }) {
         )}
 
         {arguedText.status === 'error' && (
-          <div className="text-sm text-red-600">
+          <div className="text-sm text-red-400">
             {arguedText.message}
             <button
               type="button"
@@ -148,15 +148,15 @@ export function SignalCard({ signal }: { signal: Signal }) {
 
         {arguedText.status === 'done' && arguedText.texte && (
           <div>
-            <p className="whitespace-pre-line text-sm text-gray-800">{arguedText.texte}</p>
-            <p className="mt-2 text-xs text-gray-400">
+            <p className="whitespace-pre-line text-sm text-ink/80">{arguedText.texte}</p>
+            <p className="mt-2 text-xs text-slate-500">
               {arguedText.source === 'cache' ? 'Depuis le cache du jour' : 'Generee a l\'instant'}
             </p>
           </div>
         )}
 
         {arguedText.status === 'done' && !arguedText.texte && (
-          <p className="text-sm text-gray-500">
+          <p className="text-sm text-faint">
             Analyse indisponible pour l'instant (quota Groq du jour atteint, cle API absente, ou
             erreur reseau cote serveur) -- voir le detail structure ci-dessus.
           </p>
@@ -176,9 +176,9 @@ export function SignalCard({ signal }: { signal: Signal }) {
 
 function ScoreCell({ label, value }: { label: string; value: number | null }) {
   return (
-    <div className="rounded-md bg-gray-50 p-3">
-      <p className="text-xs text-gray-500">{label}</p>
-      <p className="text-lg font-semibold text-gray-900">{value !== null ? value.toFixed(0) : 'n/a'}</p>
+    <div className="rounded-xl border border-cyan-400/10 bg-white/5 p-3">
+      <p className="text-xs text-faint">{label}</p>
+      <p className="jarvis-metric text-lg font-semibold text-ink">{value !== null ? value.toFixed(0) : 'n/a'}</p>
     </div>
   )
 }
@@ -203,7 +203,7 @@ function SignalDetail({ signal }: { signal: Signal }) {
             currency={signal.prix.devise}
             variationPct={signal.prix.variations['1j']}
           />
-          <p className="mt-1 text-xs text-gray-500">
+          <p className="mt-1 text-xs text-faint">
             7j: {formatVariation(signal.prix.variations['7j'])} - 30j:{' '}
             {formatVariation(signal.prix.variations['30j'])}
           </p>
@@ -220,7 +220,7 @@ function SignalDetail({ signal }: { signal: Signal }) {
       </div>
 
       <div>
-        <h3 className="text-sm font-semibold text-gray-900">Composantes du score</h3>
+        <h3 className="jarvis-heading text-sm font-bold">Composantes du score</h3>
         <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <ScoreCell label="Prix / Valorisation" value={signal.score_prix_valorisation} />
           <ScoreCell label="Technique" value={signal.score_technique} />
@@ -228,26 +228,26 @@ function SignalDetail({ signal }: { signal: Signal }) {
           <ScoreCell label="Fondamental reel" value={signal.score_fondamental_reel} />
         </div>
         {signal.conflit_composantes && (
-          <p className="mt-2 text-xs font-medium text-amber-700">
+          <p className="mt-2 text-xs font-medium text-amber-300">
             Contradiction detectee entre les composantes structurelles.
           </p>
         )}
       </div>
 
       <div>
-        <h3 className="text-sm font-semibold text-gray-900">Explication</h3>
-        <p className="mt-1 text-sm text-gray-700">{signal.explication}</p>
-        <p className="mt-1 text-xs text-gray-400">{signal.horizon}</p>
+        <h3 className="jarvis-heading text-sm font-bold">Explication</h3>
+        <p className="mt-1 text-sm text-ink/80">{signal.explication}</p>
+        <p className="mt-1 text-xs text-slate-500">{signal.horizon}</p>
       </div>
 
       {watchEntries.length > 0 && (
         <div>
-          <h3 className="text-sm font-semibold text-gray-900">Entreprises a surveiller</h3>
+          <h3 className="jarvis-heading text-sm font-bold">Entreprises a surveiller</h3>
           <ul className="mt-2 flex flex-col gap-1.5 text-sm">
             {watchEntries.map(([relation, watchTickers]) => (
               <li key={relation}>
-                <span className="font-medium text-gray-700">{relation}</span>
-                <span className="text-gray-500"> : {watchTickers.join(', ')}</span>
+                <span className="font-medium text-ink/80">{relation}</span>
+                <span className="text-faint"> : {watchTickers.join(', ')}</span>
               </li>
             ))}
           </ul>

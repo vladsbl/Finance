@@ -43,9 +43,9 @@ type RunState =
   | { status: 'done'; stats: CausalReasoningRunStats }
 
 const EFFET_STYLES: Record<string, string> = {
-  positif: 'bg-emerald-100 text-emerald-800',
-  negatif: 'bg-red-100 text-red-800',
-  neutre: 'bg-gray-100 text-gray-700',
+  positif: 'bg-emerald-400/15 text-emerald-300',
+  negatif: 'bg-red-400/15 text-red-300',
+  neutre: 'bg-white/10 text-ink/80',
 }
 
 const DIRECTION_LABELS: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
@@ -55,9 +55,9 @@ const DIRECTION_LABELS: Record<Exclude<DirectionFilterValue, 'toutes'>, string> 
 }
 
 const DIRECTION_BADGE_STYLES: Record<Exclude<DirectionFilterValue, 'toutes'>, string> = {
-  hausse: 'bg-emerald-100 text-emerald-800',
-  stagnation: 'bg-gray-100 text-gray-700',
-  baisse: 'bg-red-100 text-red-800',
+  hausse: 'bg-emerald-400/15 text-emerald-300',
+  stagnation: 'bg-white/10 text-ink/80',
+  baisse: 'bg-red-400/15 text-red-300',
 }
 
 function effetStyle(effet: string): string {
@@ -162,14 +162,14 @@ export function CausalReasoningPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900">Raisonnement causal</h1>
+      <h1 className="jarvis-title text-4xl font-bold">Raisonnement causal</h1>
 
-      <div className="mt-4 rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+      <div className="jarvis-card mt-4 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm text-gray-600">
+          <div className="text-sm text-faint">
             {statusState.status === 'loading' && 'Chargement du statut...'}
             {statusState.status === 'error' && (
-              <span className="text-red-600">{statusState.message}</span>
+              <span className="text-red-400">{statusState.message}</span>
             )}
             {statusState.status === 'ready' && (
               <>
@@ -184,11 +184,11 @@ export function CausalReasoningPage() {
             type="button"
             onClick={handleRun}
             disabled={buttonDisabled}
-            className="flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="jarvis-pill-primary"
           >
             {busy && (
               <span
-                className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                className="h-4 w-4 animate-spin rounded-full border-2 border-cyan-200/30 border-t-cyan-200"
                 aria-hidden="true"
               />
             )}
@@ -197,23 +197,23 @@ export function CausalReasoningPage() {
         </div>
 
         {quotaExhausted && !busy && (
-          <p className="mt-3 text-sm text-amber-700">
+          <p className="mt-3 text-sm text-amber-300">
             Quota atteint pour aujourd'hui, reessayez demain.
           </p>
         )}
 
         {runState.status === 'error' && (
-          <p className="mt-3 text-sm text-red-600">{runState.message}</p>
+          <p className="mt-3 text-sm text-red-400">{runState.message}</p>
         )}
 
         {runState.status === 'done' && (() => {
           const result = runResultMessage(runState.stats)
           const cls =
             result.kind === 'error'
-              ? 'text-red-600'
+              ? 'text-red-400'
               : result.kind === 'warning'
-                ? 'text-amber-700'
-                : 'text-emerald-700'
+                ? 'text-amber-300'
+                : 'text-emerald-400'
           return <p className={`mt-3 text-sm ${cls}`}>{result.text}</p>
         })()}
       </div>
@@ -224,23 +224,20 @@ export function CausalReasoningPage() {
 
       <div className="mt-6">
         {chainsState.status === 'loading' && (
-          <div className="flex items-center gap-3 text-gray-600">
-            <span
-              className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-600"
-              aria-hidden="true"
-            />
+          <div className="flex items-center gap-3 text-faint">
+            <span className="jarvis-spinner h-5 w-5 animate-spin" aria-hidden="true" />
             Chargement des chaines causales...
           </div>
         )}
 
         {chainsState.status === 'error' && (
-          <div className="rounded-md border border-red-200 bg-red-50 p-4 text-red-700">
+          <div className="jarvis-banner-error">
             <p className="font-medium">Impossible de charger les chaines causales.</p>
             <p className="mt-1 text-sm">{chainsState.message}</p>
             <button
               type="button"
               onClick={() => loadChains(setChainsState)}
-              className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              className="jarvis-pill-danger mt-3"
             >
               Reessayer
             </button>
@@ -250,21 +247,21 @@ export function CausalReasoningPage() {
         {chainsState.status === 'ready' && (
           <>
             {chainsState.data.staleness && (
-              <p className="mb-3 text-sm text-amber-700">{chainsState.data.staleness}</p>
+              <p className="mb-3 text-sm text-amber-300">{chainsState.data.staleness}</p>
             )}
 
             {chainsState.data.chains.length === 0 ? (
-              <div className="rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+              <div className="jarvis-empty">
                 Aucune chaine de raisonnement causal generee pour l'instant. Utilisez le bouton
                 "Recalculer maintenant" ci-dessus (limite par un quota Groq quotidien dedie).
               </div>
             ) : filteredChains.length === 0 ? (
-              <div className="rounded-md border border-gray-200 bg-gray-50 p-4 text-gray-600">
+              <div className="jarvis-empty">
                 Aucune chaine ne correspond a ce filtre de direction.
               </div>
             ) : (
               <>
-                <p className="mb-3 text-sm text-gray-500">
+                <p className="mb-3 text-sm text-faint">
                   {chainsState.data.n_total} chaine(s) de raisonnement causal disponible(s),
                   triees par date decroissante.
                 </p>
@@ -299,14 +296,14 @@ function ChainCard({ chain }: { chain: CausalChain }) {
   }, [expanded, chain.ticker_source])
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+    <div className="jarvis-card p-5">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="text-lg font-semibold text-gray-900">
-          {chain.ticker_source} <span className="font-normal text-gray-500">-- {chainDate}</span>
+        <h3 className="jarvis-heading text-lg font-bold">
+          {chain.ticker_source} <span className="font-normal text-faint">-- {chainDate}</span>
         </h3>
         <div className="flex items-center gap-2">
           {chain.confiance !== null && (
-            <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700">
+            <span className="rounded-full bg-white/10 px-3 py-1 text-sm font-medium text-ink/80">
               Confiance : {chain.confiance.toFixed(0)}%
             </span>
           )}
@@ -320,7 +317,7 @@ function ChainCard({ chain }: { chain: CausalChain }) {
           <button
             type="button"
             onClick={() => setExpanded(true)}
-            className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-600 hover:bg-gray-50"
+            className="jarvis-pill !py-1 text-xs"
           >
             Agrandir
           </button>
@@ -331,12 +328,12 @@ function ChainCard({ chain }: { chain: CausalChain }) {
         <CompanyDescription ticker={chain.ticker_source} />
       </div>
 
-      <p className="mt-1 text-xs text-gray-500">
+      <p className="mt-1 text-xs text-faint">
         News d'origine :{' '}
         {chain.news_title ? chain.news_title : `news_id=${chain.news_id} (titre indisponible)`}
       </p>
 
-      <p className="mt-3 whitespace-pre-line text-sm text-gray-800">{chain.chaine_raisonnement}</p>
+      <p className="mt-3 whitespace-pre-line text-sm text-ink/85">{chain.chaine_raisonnement}</p>
 
       {chain.entreprises_impactees.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
@@ -352,7 +349,7 @@ function ChainCard({ chain }: { chain: CausalChain }) {
         </div>
       )}
 
-      {chain.model && <p className="mt-3 text-xs text-gray-400">Modele : {chain.model}</p>}
+      {chain.model && <p className="mt-3 text-xs text-slate-500">Modele : {chain.model}</p>}
 
       <ExpandModal
         isOpen={expanded}
@@ -362,11 +359,11 @@ function ChainCard({ chain }: { chain: CausalChain }) {
         <div className="flex flex-col gap-5">
           <CompanyDescription ticker={chain.ticker_source} />
 
-          <p className="whitespace-pre-line text-base text-gray-800">{chain.chaine_raisonnement}</p>
+          <p className="whitespace-pre-line text-base text-ink/85">{chain.chaine_raisonnement}</p>
 
           {chain.entreprises_impactees.length > 0 && (
             <div>
-              <h3 className="text-sm font-semibold text-gray-900">Entreprises impactees</h3>
+              <h3 className="jarvis-heading text-sm font-bold">Entreprises impactees</h3>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {chain.entreprises_impactees.map((entry, i) => (
                   <span
@@ -382,14 +379,14 @@ function ChainCard({ chain }: { chain: CausalChain }) {
           )}
 
           <div>
-            <h3 className="text-sm font-semibold text-gray-900">
+            <h3 className="jarvis-heading text-sm font-bold">
               Contexte actuel de {chain.ticker_source}
             </h3>
             {stockState.status === 'loading' && (
-              <p className="mt-1 text-sm text-gray-500">Chargement...</p>
+              <p className="mt-1 text-sm text-faint">Chargement...</p>
             )}
             {stockState.status === 'error' && (
-              <p className="mt-1 text-sm text-red-600">{stockState.message}</p>
+              <p className="mt-1 text-sm text-red-400">{stockState.message}</p>
             )}
             {stockState.status === 'ready' && (
               <div className="mt-2">
@@ -403,14 +400,14 @@ function ChainCard({ chain }: { chain: CausalChain }) {
                 </div>
                 <div className="mt-3 flex gap-6 text-xs">
                   <div>
-                    <span className="text-gray-500">Score final</span>
-                    <p className="text-sm font-semibold text-gray-900">
+                    <span className="text-faint">Score final</span>
+                    <p className="jarvis-metric text-sm font-semibold text-ink">
                       {stockState.data.final_score !== null ? stockState.data.final_score.toFixed(0) : 'n/a'}
                     </p>
                   </div>
                   <div>
-                    <span className="text-gray-500">Confiance</span>
-                    <p className="text-sm font-semibold text-gray-900">
+                    <span className="text-faint">Confiance</span>
+                    <p className="jarvis-metric text-sm font-semibold text-ink">
                       {stockState.data.confidence !== null ? `${stockState.data.confidence.toFixed(0)}%` : 'n/a'}
                     </p>
                   </div>
@@ -420,9 +417,9 @@ function ChainCard({ chain }: { chain: CausalChain }) {
           </div>
 
           {chain.news_title && (
-            <p className="text-xs text-gray-500">News d'origine : {chain.news_title}</p>
+            <p className="text-xs text-faint">News d'origine : {chain.news_title}</p>
           )}
-          {chain.model && <p className="text-xs text-gray-400">Modele : {chain.model}</p>}
+          {chain.model && <p className="text-xs text-slate-500">Modele : {chain.model}</p>}
         </div>
       </ExpandModal>
     </div>

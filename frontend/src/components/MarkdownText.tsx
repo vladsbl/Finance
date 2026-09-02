@@ -13,17 +13,17 @@ import ReactMarkdown from 'react-markdown'
  */
 export function MarkdownText({ children }: { children: string }) {
   return (
-    <div className="text-sm text-gray-800">
+    <div className="text-sm text-ink/85">
       <ReactMarkdown
         components={{
           p: ({ ...props }) => <p className="mb-3 last:mb-0" {...props} />,
-          strong: ({ ...props }) => <strong className="font-semibold text-gray-900" {...props} />,
+          strong: ({ ...props }) => <strong className="font-semibold text-cyan-200" {...props} />,
           ul: ({ ...props }) => <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0" {...props} />,
           ol: ({ ...props }) => <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0" {...props} />,
           li: ({ ...props }) => <li {...props} />,
           blockquote: ({ ...props }) => (
             <blockquote
-              className="mb-3 border-l-4 border-indigo-200 pl-3 italic text-gray-600 last:mb-0"
+              className="mb-3 border-l-4 border-cyan-400/30 pl-3 italic text-faint last:mb-0"
               {...props}
             />
           ),
