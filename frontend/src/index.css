@@ -128,4 +128,23 @@ body {
   .jarvis-pill-danger:hover:not(:disabled) {
     @apply border-red-300 text-white shadow-[0_0_18px_rgba(248,113,113,0.35)];
   }
+
+  /* Knowledge Graph canvas backdrop -- radial navy gradient (same recipe
+     as body's own background, see the top of this file) layered under a
+     very faint tiled starfield (a handful of small dots at low opacity in
+     a repeating SVG tile), so the "sphere of connected particles" reads
+     against a night-sky-like depth instead of a flat panel. Pure CSS, no
+     canvas/JS cost, and deliberately subtle (max dot opacity 0.55, radii
+     under 1.3px) so it never competes with the graph's own nodes/links for
+     attention. GraphView.tsx sets the ForceGraph2D canvas itself to a
+     transparent backgroundColor specifically so this shows through. */
+  .jarvis-graph-bg {
+    background-color: #05070a;
+    background-image:
+      radial-gradient(ellipse at 50% 35%, rgba(13, 21, 32, 0.92) 0%, rgba(5, 7, 10, 0.98) 75%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Ccircle cx='18' cy='24' r='0.6' fill='%23dce8f5' fill-opacity='0.5'/%3E%3Ccircle cx='54' cy='90' r='0.8' fill='%23dce8f5' fill-opacity='0.35'/%3E%3Ccircle cx='110' cy='40' r='0.5' fill='%235fe3ff' fill-opacity='0.55'/%3E%3Ccircle cx='150' cy='160' r='1' fill='%23dce8f5' fill-opacity='0.3'/%3E%3Ccircle cx='200' cy='70' r='0.7' fill='%23dce8f5' fill-opacity='0.45'/%3E%3Ccircle cx='30' cy='150' r='0.6' fill='%23dce8f5' fill-opacity='0.4'/%3E%3Ccircle cx='80' cy='200' r='0.9' fill='%235fe3ff' fill-opacity='0.3'/%3E%3Ccircle cx='190' cy='190' r='0.5' fill='%23dce8f5' fill-opacity='0.5'/%3E%3Ccircle cx='120' cy='120' r='0.7' fill='%23dce8f5' fill-opacity='0.35'/%3E%3Ccircle cx='60' cy='10' r='0.6' fill='%23dce8f5' fill-opacity='0.55'/%3E%3Ccircle cx='170' cy='10' r='0.8' fill='%23dce8f5' fill-opacity='0.3'/%3E%3Ccircle cx='10' cy='190' r='0.5' fill='%23dce8f5' fill-opacity='0.4'/%3E%3Ccircle cx='140' cy='60' r='0.9' fill='%235fe3ff' fill-opacity='0.4'/%3E%3Ccircle cx='100' cy='180' r='0.6' fill='%23dce8f5' fill-opacity='0.3'/%3E%3C/svg%3E");
+    background-size: cover, 220px 220px;
+    background-position: center, 0 0;
+    background-repeat: no-repeat, repeat;
+  }
 }
